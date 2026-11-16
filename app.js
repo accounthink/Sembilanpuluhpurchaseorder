@@ -1,0 +1,609 @@
+/* Dashboard Pengajuan PO — Sembilan Puluh Interior
+   Login & data bersama: Firebase Auth (email/kata sandi) + Firestore.
+   Mode demo tanpa Firebase: buka index.html?demo (data hanya di memori). */
+'use strict';
+const KOP = window.KOP;
+const DEF_JAB = [{id:'acc',title:'Accounting'},{id:'spv',title:'SPV Proyek'},{id:'bm',title:'Branch Manager'},{id:'gm',title:'General Manager'},{id:'dir',title:'Direktur'}];
+const DEF_RULES = [
+  {max:5000000,  modes:{acc:'approve',spv:'none',bm:'none',gm:'none',dir:'none'}},
+  {max:15000000, modes:{acc:'none',spv:'approve',bm:'none',gm:'none',dir:'none'}},
+  {max:25000000, modes:{acc:'none',spv:'none',bm:'approve',gm:'none',dir:'none'}},
+  {max:99000000, modes:{acc:'none',spv:'none',bm:'none',gm:'approve',dir:'none'}},
+  {max:null,     modes:{acc:'none',spv:'none',bm:'none',gm:'none',dir:'approve'}}
+];
+const DEF_NOTE = 'Mohon barang dikirim sesuai spesifikasi & tanggal dibutuhkan.';
+const BULAN = ['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+const VIEWS = {dashboard:'Dashboard',pengajuan:'Pengajuan PO',persetujuan:'Persetujuan',rekap:'Rekap Pembelian',pengaturan:'Pengaturan'};
+const IC = {
+ dashboard:'<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>',
+ pengajuan:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 3h8l4 4v14H7z"/><path d="M10 12h6M10 16h6"/></svg>',
+ persetujuan:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>',
+ pengaturan:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>',
+ rekap:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>',
+ dl:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>',
+ box:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 8l8-4 8 4v8l-8 4-8-4z"/><path d="M4 8l8 4 8-4M12 12v8"/></svg>',
+ clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+ coin:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9 9.500h4.500a2 2 0 010 4H10a2 2 0 000 4h5M12 6.500v11"/></svg>',
+ star:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l2.700 5.600 6.100.800-4.500 4.300 1.100 6.100L12 16.900 6.600 19.800l1.100-6.100L3.200 9.400l6.100-.800z"/></svg>'
+};
+// auth: 'loading' | 'setup' | 'out' | 'in'
+const S = {auth:'loading', pos:[], users:{}, cfg:{}, me:{id:'',email:''}, loaded:false, view:'dashboard', q:'', fs:'', gate:'login'};
+let fs = null, auth = null, unsubs = [], pendingName = '', W = null, F = null, pad = null;
+
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+const esc = v => String(v==null?'':v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+const fnum = n => Math.round(n).toLocaleString('id-ID');
+const rp = n => 'Rp. ' + fnum(n);
+const qtyf = n => (+n).toLocaleString('id-ID', {maximumFractionDigits:3});
+const today = () => { const d = new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+const tgl = s => { if(!s) return '-'; const [y,m,d] = s.split('-'); return (+d)+' '+BULAN[+m-1]+' '+y; };
+const tglShort = t => { const d = new Date(t); return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); };
+const clone = o => JSON.parse(JSON.stringify(o));
+const rid = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const okSig = s => typeof s === 'string' && s.startsWith('data:image/png;base64,');
+function calc(po){
+  const items = (po.items||[]).map(i => ({...i, jumlah: num(i.qty)*num(i.harga) - num(i.diskon)}));
+  const subtotal = items.reduce((a,i) => a+i.jumlah, 0), ppn = Math.round(subtotal*num(po.ppnPct)/100);
+  return {items, subtotal, ppn, total: subtotal+ppn};
+}
+function toast(t){ const b = $('#toastBox'); b.innerHTML = '<div class="toast">'+esc(t)+'</div>'; clearTimeout(toast.t); toast.t = setTimeout(() => b.innerHTML = '', 4000); }
+
+/* ---------- jabatan & aturan nominal ---------- */
+const jab = () => (Array.isArray(S.cfg.jabatan) && S.cfg.jabatan.length) ? S.cfg.jabatan : DEF_JAB;
+const rules = () => (Array.isArray(S.cfg.rules) && S.cfg.rules.length) ? S.cfg.rules : DEF_RULES;
+function ruleFor(total){
+  const rs = [...rules()].sort((a,b) => (a.max==null?Infinity:a.max) - (b.max==null?Infinity:b.max));
+  return rs.find(r => r.max==null || total <= r.max) || rs[rs.length-1];
+}
+function flowFor(po){
+  const r = ruleFor(calc(po).total), m = r.modes || {};
+  let flow = jab().filter(j => m[j.id] === 'approve');
+  if(!flow.length) flow = jab();
+  return {flow, knowers: jab().filter(j => m[j.id] === 'know' && !flow.includes(j))};
+}
+const me = () => S.users[S.me.id] || {};
+const myRole = () => me().role || '';
+const isAdmin = () => !!S.me.id && S.cfg.adminUid === S.me.id;
+const roleName = r => r === 'purchasing' ? 'Purchasing' : ((jab().find(l => l.id === r) || {}).title || 'Belum ada jabatan');
+const isPurch = () => myRole() === 'purchasing';
+const poFlow = po => (po.status !== 'draft' && Array.isArray(po.flow) && po.flow.length) ? po.flow : flowFor(po).flow;
+const poKnowers = po => po.status !== 'draft' ? (po.knowers || []) : flowFor(po).knowers;
+const curLevel = po => po.status === 'diajukan' ? poFlow(po)[po.step||0] : null;
+const canApprove = po => { const l = curLevel(po); return !!l && myRole() === l.id; };
+const canKnow = po => (po.status === 'diajukan' || po.status === 'disetujui') && (po.knowIds||[]).includes(myRole()) && !(po.knows||[]).some(k => k.levelId === myRole());
+const canEdit = po => isPurch() && po.status !== 'disetujui';
+const canDelete = po => (isPurch() && po.status !== 'disetujui') || isAdmin();
+const stLabel = po => po.status === 'draft' ? 'Draft' : po.status === 'disetujui' ? 'Disetujui' : po.status === 'ditolak' ? 'Ditolak' : 'Menunggu ' + ((curLevel(po)||{}).title || '');
+const stPill = po => '<span class="st '+esc(po.status)+'">'+esc(stLabel(po))+'</span>';
+const sorted = () => [...S.pos].sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+const pendingMine = () => S.pos.filter(p => canApprove(p) || canKnow(p));
+function nextNo(date, skipId){
+  const [y,m] = date.split('-'), pre = 'PO-'+y.slice(2)+m+'-'; let mx = 0;
+  S.pos.forEach(p => { if(p.id !== skipId && String(p.no||'').startsWith(pre)){ const n = parseInt(String(p.no).slice(pre.length),10); if(n > mx) mx = n; } });
+  return pre + String(mx+1).padStart(3,'0');
+}
+
+/* ---------- penyimpanan (Firestore, atau memori saat demo) ---------- */
+async function write(fn, mem){
+  try { if(fs) await fn(); else { mem(); render(); } return true; }
+  catch(e){ console.error(e); toast(e && e.code === 'permission-denied' ? 'Ditolak: Anda tidak berwenang untuk tindakan ini.' : 'Gagal menyimpan, coba lagi.'); return false; }
+}
+const memPO = id => S.pos.find(p => p.id === id);
+const setPO = (id,d) => write(() => fs.collection('pos').doc(id).set(d), () => { const i = S.pos.findIndex(p => p.id === id), r = {...d,id}; if(i<0) S.pos.push(r); else S.pos[i] = r; });
+const updPO = (id,patch) => write(() => fs.collection('pos').doc(id).update(patch), () => Object.assign(memPO(id), patch));
+const delPO = id => write(() => fs.collection('pos').doc(id).delete(), () => { S.pos = S.pos.filter(p => p.id !== id); });
+const updUser = (uid,patch) => write(() => fs.collection('users').doc(uid).update(patch), () => { S.users[uid] = {...S.users[uid], ...patch}; });
+const updCfg = patch => write(() => fs.collection('config').doc('app').update(patch), () => Object.assign(S.cfg, patch));
+
+/* ---------- mulai ---------- */
+function init(){
+  route();
+  const c = window.FIREBASE_CONFIG || {}, ready = c.apiKey && !/^ISI/.test(c.apiKey);
+  if(window.DEMO || /[?&]demo\b/.test(location.search)){
+    S.auth = 'in'; S.loaded = true; S.demo = true;
+    S.me = {id:'demo', email:'demo@contoh.id'};
+    S.users = {demo:{name:'', sig:'', email:'demo@contoh.id', role:'purchasing'}};
+    S.cfg = {adminUid:'demo', jabatan:clone(DEF_JAB), rules:clone(DEF_RULES)};
+    seedDemo();
+    return render();
+  }
+  if(!ready || !window.firebase){ S.auth = 'setup'; return render(); }
+  firebase.initializeApp(c); auth = firebase.auth(); fs = firebase.firestore();
+  auth.onAuthStateChanged(u => {
+    unsubs.forEach(f => f()); unsubs = []; S.pos = []; S.users = {}; S.cfg = {}; S.loaded = false; W = null; closeModal();
+    if(!u){ S.auth = 'out'; S.me = {id:'',email:''}; return render(); }
+    S.auth = 'in'; S.me = {id:u.uid, email:u.email||''}; render(); subscribe();
+  });
+  render();
+}
+function seedDemo(){
+  S.users.demo.name = 'Pengguna Demo';
+  const mk = (n, st, jenis, project, supplier, items) => {
+    const d = {id:'d'+n, no:nextNo(today()), tanggal:today(), project, supplier, prioritas:'Normal', jenis, bank:'BCA', rek:'7890123456', an:supplier, items, ppnPct:0, catatan:DEF_NOTE, status:st,
+      step:0, approvals:[], knows:[], rejected:null, flow:[], knowers:[], knowIds:[], createdBy:'demo', createdAt:Date.now()-n*1000, updatedAt:Date.now(), createdName:'Pengguna Demo', createdSig:''};
+    if(st !== 'draft') Object.assign(d, submitFields(d));
+    if(st === 'disetujui'){ d.step = d.flow.length; d.approvals = d.flow.map(l => ({levelId:l.id, title:l.title, by:'contoh', name:'Contoh '+l.title, sig:'', at:Date.now()})); }
+    S.pos.push(d);
+  };
+  mk(1, 'disetujui', 'Material', 'Ibu Rusnaini', 'Interma', [{nama:'HPL Th 009 D', qty:4, satuan:'lbr', harga:215000, diskon:20000, ket:''}]);
+  mk(2, 'diajukan', 'Material', 'Kitchen Set Pak Andi', 'Setia Jaya', [{nama:'Plywood 18 mm', qty:40, satuan:'lbr', harga:250000, diskon:0, ket:''}, {nama:'HPL Th 009 D', qty:28, satuan:'lbr', harga:250000, diskon:0, ket:''}]);
+  mk(3, 'draft', 'Inventaris', 'Workshop', 'Mitra Teknik', [{nama:'Mesin bor', qty:1, satuan:'unit', harga:750000, diskon:0, ket:''}]);
+}
+// Menyimpan file ke perangkat. Di dalam pratinjau Claude, unduhan lewat jalur khususnya.
+async function saveFile(name, blob){
+  if(window.claude && window.claude.use){ const dl = await window.claude.use('downloads'); if(!dl) throw {code:'unavailable'}; await dl.save({filename:name, data:blob}); return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function subscribe(){
+  const fail = e => { console.error(e); toast('Data tidak dapat dimuat. Periksa koneksi atau aturan Firestore.'); };
+  let seen = {u:false, c:false};
+  const check = () => { if(seen.u && seen.c && !S.loaded){ S.loaded = true; } render(); };
+  unsubs.push(fs.collection('users').onSnapshot(s => {
+    const o = {}; s.forEach(d => o[d.id] = d.data()); S.users = o;
+    if(!o[S.me.id] && !subscribe.made){ subscribe.made = true;
+      fs.collection('users').doc(S.me.id).set({name: pendingName || (S.me.email.split('@')[0]), email: S.me.email, sig:'', role:'', createdAt: Date.now()}).catch(fail).finally(() => subscribe.made = false); }
+    seen.u = true; check();
+  }, fail));
+  unsubs.push(fs.collection('config').doc('app').onSnapshot(s => {
+    if(s.exists) S.cfg = s.data();
+    else fs.collection('config').doc('app').set({adminUid:S.me.id, jabatan:DEF_JAB, rules:DEF_RULES}).catch(() => {}); // pengguna pertama = admin
+    seen.c = true; check();
+  }, fail));
+  unsubs.push(fs.collection('pos').onSnapshot(s => { const a = []; s.forEach(d => a.push({...d.data(), id:d.id})); S.pos = a; render(); }, fail));
+}
+
+/* ---------- gerbang: setup & login ---------- */
+function gateHTML(){
+  if(S.auth === 'loading') return '<div class="gate"><h1>Memuat…</h1></div>';
+  if(S.auth === 'setup') return '<div class="gate"><h1>Hubungkan Firebase</h1><p>Aplikasi ini belum terhubung ke proyek Firebase.</p><p>Isi <code>firebase-config.js</code> dengan konfigurasi proyek Anda, lalu pasang <code>firestore.rules</code>. Langkah lengkapnya ada di <code>README.md</code>.</p><p>Ingin melihat-lihat dulu tanpa Firebase?</p><a class="btn p" href="?demo" style="text-decoration:none">Buka mode demo</a></div>';
+  const reg = S.gate === 'daftar';
+  return '<form class="gate" id="gateForm"><h1>'+(reg?'Daftar akun':'Masuk')+'</h1><p>Dashboard Pengajuan PO — Sembilan Puluh Interior</p>'+
+    (reg?'<label>Nama (tercetak di PO)</label><input type="text" id="gName" maxlength="60" required>':'')+
+    '<label>Email</label><input type="text" inputmode="email" autocomplete="username" id="gEmail" required>'+
+    '<label>Kata sandi</label><input type="password" id="gPass" autocomplete="'+(reg?'new-password':'current-password')+'" required minlength="6" style="background:rgba(255,255,255,.7);border:1.5px solid rgba(255,255,255,.9);border-radius:11px;padding:9px 12px;width:100%;outline:0">'+
+    '<button class="btn p" type="submit">'+(reg?'Daftar':'Masuk')+'</button>'+
+    '<div class="alt"><button type="button" class="link" data-act="gswitch">'+(reg?'Sudah punya akun? Masuk':'Belum punya akun? Daftar')+'</button>'+(reg?'':'<button type="button" class="link" data-act="greset">Lupa kata sandi</button>')+'</div></form>';
+}
+const AUTH_MSG = {'auth/invalid-credential':'Email atau kata sandi salah.','auth/wrong-password':'Email atau kata sandi salah.','auth/user-not-found':'Akun tidak ditemukan.','auth/email-already-in-use':'Email ini sudah terdaftar. Silakan masuk.','auth/weak-password':'Kata sandi minimal 6 karakter.','auth/invalid-email':'Format email tidak valid.','auth/too-many-requests':'Terlalu banyak percobaan. Coba lagi nanti.','auth/network-request-failed':'Tidak ada koneksi internet.','auth/operation-not-allowed':'Login email/kata sandi belum diaktifkan di Firebase (README langkah 2).','auth/unauthorized-domain':'Domain ini belum diizinkan di Firebase Authentication (README langkah 6).'};
+async function gateSubmit(){
+  const email = $('#gEmail').value.trim(), pass = $('#gPass').value, btn = $('#gateForm button[type=submit]');
+  btn.disabled = true;
+  try {
+    if(S.gate === 'daftar'){ pendingName = $('#gName').value.trim(); await auth.createUserWithEmailAndPassword(email, pass); }
+    else await auth.signInWithEmailAndPassword(email, pass);
+  } catch(e){ btn.disabled = false; toast(AUTH_MSG[e.code] || 'Gagal masuk: ' + (e.message||e.code)); }
+}
+
+/* ---------- render ---------- */
+function route(){ const h = location.hash.slice(1); S.view = VIEWS[h] ? h : 'dashboard'; }
+window.addEventListener('hashchange', () => { route(); if(S.view !== 'pengaturan') W = null; render(); });
+function render(){
+  const inApp = S.auth === 'in';
+  $('#app').hidden = !inApp;
+  const g = $('#gate');
+  if(!inApp){ const key = S.auth + S.gate; if(g.dataset.k !== key){ g.dataset.k = key; g.innerHTML = gateHTML(); } return; }
+  g.dataset.k = ''; g.innerHTML = '';
+  const pm = pendingMine().length, nm = me().name || '';
+  $('#nav').innerHTML = Object.keys(VIEWS).map((k,i) => (k==='pengaturan'?'<hr>':'')+'<button class="nav'+(S.view===k?' on':'')+'" data-go="'+k+'">'+IC[k]+'<span>'+VIEWS[k]+'</span>'+(k==='persetujuan'&&pm?'<span class="cnt">'+pm+'</span>':'')+'</button>').join('');
+  $('#hello').textContent = 'Selamat datang' + (nm ? ', '+nm : '') + ' 👋';
+  $('#title').textContent = VIEWS[S.view];
+  $('#ava').textContent = (nm||'?').charAt(0).toUpperCase();
+  $('#whoName').textContent = nm || 'Isi profil';
+  $('#whoRole').textContent = roleName(myRole()) + (isAdmin() ? ' · Admin' : '');
+  let n = '';
+  if(S.demo) n += '<div class="note warn">Mode demo — data hanya tersimpan sementara di tab ini. Ganti jabatan Anda di Pengaturan untuk mencoba tiap peran.</div>';
+  if(S.loaded && !myRole()) n += '<div class="note">'+(isAdmin() ? 'Anda admin. Tetapkan jabatan Anda dan pengguna lain di menu Pengaturan.' : 'Jabatan Anda belum ditetapkan. Minta admin menetapkannya di menu Pengaturan.')+'</div>';
+  $('#notes').innerHTML = n;
+  const v = $('#view');
+  if(!S.loaded){ v.innerHTML = '<div class="card empty">Memuat data…</div>'; return; }
+  if(S.view === 'pengaturan' && isAdmin() && W && v.querySelector('#setBox')) { renderUsers(); return; } // jangan timpa isian yang belum disimpan
+  v.innerHTML = ({dashboard:vDash, pengajuan:vList, persetujuan:vAppr, rekap:vRekap, pengaturan:vSet})[S.view]();
+}
+function rowActs(po){
+  const id = esc(po.id); let a = '<button class="btn sm" data-act="view" data-id="'+id+'">Lihat</button>';
+  if(canApprove(po)) a += '<button class="btn sm p" data-act="approve" data-id="'+id+'">Setujui</button><button class="btn sm d" data-act="reject" data-id="'+id+'">Tolak</button>';
+  if(canKnow(po)) a += '<button class="btn sm p" data-act="know" data-id="'+id+'">Mengetahui</button>';
+  if(canEdit(po)) a += '<button class="btn sm" data-act="edit" data-id="'+id+'">Edit</button>';
+  if(canDelete(po)) a += '<button class="btn sm d" data-act="del" data-id="'+id+'">Hapus</button>';
+  if(po.status === 'disetujui') a += '<button class="btn sm p" data-act="pdf" data-id="'+id+'">'+IC.dl+'Unduh PO</button>';
+  return '<div class="acts">'+a+'</div>';
+}
+function poTable(list, acts, emptyMsg, compact){
+  if(!list.length) return '<div class="empty">'+esc(emptyMsg)+'</div>';
+  return '<div class="tw"><table><thead><tr><th>No. PO</th>'+(compact?'':'<th>Tanggal</th>')+'<th>Project</th>'+(compact?'':'<th>Supplier</th>')+'<th class="num">Total</th><th>Status</th>'+(acts?'<th></th>':'')+'</tr></thead><tbody>'+
+  list.map(po => '<tr><td><button class="pono" data-act="view" data-id="'+esc(po.id)+'">'+esc(po.no)+'</button></td>'+
+    (compact?'':'<td style="white-space:nowrap">'+esc(tgl(po.tanggal))+'</td>')+
+    '<td>'+esc(po.project)+(compact?'<br><span style="font-size:11.5px;color:var(--ink2);white-space:nowrap">'+esc(po.supplier)+'</span>':'')+'</td>'+
+    (compact?'':'<td>'+esc(po.supplier)+'</td>')+'<td class="num">'+rp(calc(po).total)+'</td><td>'+stPill(po)+'</td>'+(acts?'<td>'+rowActs(po)+'</td>':'')+'</tr>').join('')+'</tbody></table></div>';
+}
+function vDash(){
+  const c = {disetujui:0, diajukan:0, ditolak:0, draft:0}; let val = 0;
+  S.pos.forEach(p => { if(c[p.status] != null) c[p.status]++; if(p.status === 'disetujui') val += calc(p).total; });
+  const tot = S.pos.length || 1, pm = pendingMine().length, pct = k => (c[k]/tot*100)+'%';
+  const jt = val >= 1e9 ? [(val/1e9).toLocaleString('id-ID',{maximumFractionDigits:2}),'M'] : val >= 1e6 ? [(val/1e6).toLocaleString('id-ID',{maximumFractionDigits:1}),'jt'] : [fnum(val),''];
+  const cta = isPurch() ? ['Jangan lupa','Buat pengajuan PO baru','Buat pengajuan','new'] : pm ? ['Perlu tindakan', pm+' PO menunggu tindakan Anda','Buka persetujuan','goappr'] : ['Semua beres','Tidak ada PO yang menunggu Anda','Lihat semua PO','golist'];
+  return '<div class="grid"><div class="col"><div class="card"><div class="chead"><h2>Pengajuan terbaru</h2><button class="link" data-go="pengajuan">Lihat semua</button></div>'+
+    poTable(sorted().slice(0,6), false, 'Belum ada pengajuan PO.', true)+'</div></div>'+
+  '<div class="col"><div class="card"><div class="chead"><h2>Ringkasan status</h2><button class="link" data-go="pengajuan">Lihat semua</button></div>'+
+    '<div class="bar"><span style="width:'+pct('disetujui')+';background:var(--ok)"></span><span style="width:'+pct('diajukan')+';background:var(--wait)"></span><span style="width:'+pct('ditolak')+';background:var(--no)"></span><span style="width:'+pct('draft')+';background:var(--draft)"></span></div>'+
+    '<div class="legend"><div><small><i class="dot" style="background:var(--ok)"></i>Disetujui</small><b>'+c.disetujui+'</b></div><div><small><i class="dot" style="background:var(--wait)"></i>Menunggu</small><b>'+c.diajukan+'</b></div><div><small><i class="dot" style="background:var(--no)"></i>Ditolak</small><b>'+c.ditolak+'</b></div><div><small><i class="dot" style="background:var(--draft)"></i>Draft</small><b>'+c.draft+'</b></div></div></div>'+
+  '<div class="tiles">'+
+    '<div class="card tile"><div class="ticon t1">'+IC.box+'</div><div><small>Total PO</small><strong>'+S.pos.length+'</strong></div></div>'+
+    '<div class="card tile"><div class="ticon t2">'+IC.coin+'</div><div><small>Nilai disetujui</small><strong><i>Rp </i>'+jt[0]+'<i>'+jt[1]+'</i></strong></div></div>'+
+    '<div class="card tile"><div class="ticon t3">'+IC.clock+'</div><div><small>Dalam proses</small><strong>'+c.diajukan+'</strong></div></div>'+
+    '<div class="card tile"><div class="ticon t4">'+IC.star+'</div><div><small>Menunggu saya</small><strong>'+pm+'</strong></div></div></div>'+
+  '<div class="cta"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i><small>'+cta[0]+'</small><h3>'+esc(cta[1])+'</h3><button class="pill" data-act="'+cta[3]+'">'+cta[2]+'</button></div>'+
+  '</div></div>';
+}
+function filtered(){ const q = S.q.trim().toLowerCase(); return sorted().filter(p => (!S.fs || p.status === S.fs) && (!q || [p.no,p.project,p.supplier].join(' ').toLowerCase().includes(q))); }
+function vList(){
+  return '<div class="card"><div class="chead"><div class="filters"><input type="text" id="q" placeholder="Cari no. PO, project, supplier…" value="'+esc(S.q)+'"><select id="fs"><option value="">Semua status</option>'+
+    [['draft','Draft'],['diajukan','Menunggu persetujuan'],['disetujui','Disetujui'],['ditolak','Ditolak']].map(o => '<option value="'+o[0]+'"'+(S.fs===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select></div>'+
+    (isPurch() ? '<button class="btn p" data-act="new">+ Buat pengajuan PO</button>' : '')+'</div><div id="listBody">'+poTable(filtered(), true, S.pos.length ? 'Tidak ada PO yang cocok.' : 'Belum ada pengajuan PO.')+'</div></div>';
+}
+function vAppr(){
+  const r = myRole();
+  if(!r || r === 'purchasing') return '<div class="card empty">Halaman ini untuk jabatan yang menyetujui atau mengetahui PO ('+esc(jab().map(l => l.title).join(', '))+').<br>Jabatan Anda saat ini: '+esc(roleName(r))+'.</div>';
+  const mine = p => (p.approvals||[]).some(a => a.by === S.me.id) || (p.rejected && p.rejected.by === S.me.id) || (p.knows||[]).some(k => k.by === S.me.id);
+  return '<div class="col"><div class="card"><div class="chead"><h2>Menunggu tindakan Anda · '+esc(roleName(r))+'</h2></div>'+poTable(pendingMine(), true, 'Tidak ada PO yang menunggu tindakan Anda.')+'</div>'+
+    '<div class="card"><div class="chead"><h2>Riwayat keputusan Anda</h2></div>'+poTable(sorted().filter(mine), true, 'Belum ada riwayat.')+'</div></div>';
+}
+/* ----- rekap pembelian bulanan ----- */
+function rekap(){
+  const m=S.rm||today().slice(0,7),g={Material:{rows:[],sub:0,ppn:0},Inventaris:{rows:[],sub:0,ppn:0}};
+  S.pos.filter(p=>p.status==='disetujui'&&String(p.tanggal||'').slice(0,7)===m)
+    .sort((a,b)=>String(a.tanggal).localeCompare(String(b.tanggal))||String(a.no).localeCompare(String(b.no)))
+    .forEach(p=>{const c=calc(p),k=g[p.jenis==='Inventaris'?'Inventaris':'Material'];c.items.forEach(i=>k.rows.push({p,i}));k.sub+=c.subtotal;k.ppn+=c.ppn});
+  return {m,g};
+}
+const blnLabel=m=>BULAN[+m.slice(5,7)-1]+' '+m.slice(0,4);
+function vRekap(){
+  const {m,g}=rekap(),tot=k=>g[k].sub+g[k].ppn;
+  const months=[...new Set(S.pos.map(p=>String(p.tanggal||'').slice(0,7)).filter(x=>/^\d{4}-\d{2}$/.test(x)).concat(today().slice(0,7),m))].sort().reverse();
+  const tile=(c,ic,l,v)=>'<div class="card tile"><div class="ticon '+c+'">'+ic+'</div><div><small>'+l+'</small><strong style="font-size:20px">'+rp(v)+'</strong></div></div>';
+  const sec=k=>'<div class="card"><div class="chead"><h2>'+k+' · '+g[k].rows.length+' item</h2><b style="font-weight:600">'+rp(tot(k))+'</b></div>'+(g[k].rows.length?
+    '<div class="tw"><table><thead><tr><th>Tgl</th><th>No. PO</th><th>Barang</th><th class="num">Qty</th><th class="num">Jumlah</th></tr></thead><tbody>'+
+    g[k].rows.map(r=>'<tr><td style="white-space:nowrap">'+esc(String(r.p.tanggal||'').slice(8,10)+'/'+String(r.p.tanggal||'').slice(5,7))+'</td><td><button class="pono" data-act="view" data-id="'+esc(r.p.id)+'">'+esc(r.p.no)+'</button></td><td>'+esc(r.i.nama)+'<br><span style="font-size:11.5px;color:var(--ink2)">'+esc(r.p.supplier)+' · '+esc(r.p.project)+'</span></td><td class="num">'+qtyf(r.i.qty)+' '+esc(r.i.satuan)+'</td><td class="num">'+rp(r.i.jumlah)+'</td></tr>').join('')+
+    (g[k].ppn?'<tr><td colspan="4" class="num">PPN</td><td class="num">'+rp(g[k].ppn)+'</td></tr>':'')+
+    '<tr><td colspan="4" class="num"><b>Total '+k+'</b></td><td class="num"><b>'+rp(tot(k))+'</b></td></tr></tbody></table></div>'
+    :'<div class="empty">Belum ada pembelian '+k.toLowerCase()+' yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>';
+  return '<div class="col"><div class="card"><div class="chead" style="margin:0"><div class="filters"><select id="rm">'+months.map(x=>'<option value="'+x+'"'+(x===m?' selected':'')+'>'+blnLabel(x)+'</option>').join('')+'</select></div><button class="btn" data-act="csv">'+IC.dl+'Unduh rekap (Excel)</button></div>'+
+    '<div style="font-size:12px;color:var(--ink2);margin-top:10px">Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Nilai jumlah sudah dipotong diskon. Rincian harga satuan ada di unduhan Excel.</div></div>'+
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px">'+tile('t1',IC.box,'Material',tot('Material'))+tile('t3',IC.rekap,'Inventaris',tot('Inventaris'))+tile('t4',IC.coin,'Total bulan ini',tot('Material')+tot('Inventaris'))+'</div>'+
+    sec('Material')+sec('Inventaris')+'</div>';
+}
+function loadExcel(){return window.ExcelJS?Promise.resolve():new Promise((ok,no)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';s.onload=()=>ok();s.onerror=()=>no(new Error('exceljs'));document.head.appendChild(s)})}
+async function rekapXLSX(){
+  await loadExcel();
+  const {m,g}=rekap(),bl=blnLabel(m),wb=new ExcelJS.Workbook();wb.creator='Dashboard PO Sembilan Puluh Interior';
+  const ws=wb.addWorksheet('Rekap '+bl,{views:[{showGridLines:false}],pageSetup:{orientation:'landscape',paperSize:9,fitToPage:true,fitToWidth:1,fitToHeight:0,margins:{left:.4,right:.4,top:.5,bottom:.5,header:.2,footer:.2}}});
+  ws.columns=[5,12,17,22,22,34,8,9,16,14,18].map(w=>({width:w}));
+  const thin={style:'thin',color:{argb:'FFBFBFBF'}},box={top:thin,left:thin,bottom:thin,right:thin},fill=c=>({type:'pattern',pattern:'solid',fgColor:{argb:c}}),NF='#,##0;-#,##0;"-"',H=['No','Tanggal','No. PO','Project','Supplier','Nama Barang','Qty','Satuan','Harga Satuan (Rp)','Diskon (Rp)','Jumlah (Rp)'],AL=['center','center','left','left','left','left','center','center','right','right','right'];
+  const band=(r,text,st)=>{ws.mergeCells(r,1,r,10);const c=ws.getCell(r,1);c.value=text;Object.assign(c,st);return c};
+  let r=1;
+  band(r,'SEMBILAN PULUH INTERIOR',{font:{bold:true,size:14,color:{argb:'FF1F3864'}}});ws.getRow(r).height=22;r++;
+  band(r,'REKAP PEMBELIAN — '+bl.toUpperCase(),{font:{bold:true,size:12}});r++;
+  band(r,'Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Jumlah sudah dipotong diskon.',{font:{italic:true,size:9,color:{argb:'FF7F7F7F'}}});r+=2;
+  const totals=[];
+  ['Material','Inventaris'].forEach(k=>{
+    band(r,k.toUpperCase()+'  ·  '+g[k].rows.length+' item',{font:{bold:true,size:11}});r++;
+    H.forEach((h,i)=>{const c=ws.getCell(r,i+1);c.value=h;c.font={bold:true,color:{argb:'FFFFFFFF'},size:10};c.fill=fill('FF4A442A');c.alignment={horizontal:'center',vertical:'middle',wrapText:true};c.border=box});ws.getRow(r).height=22;r++;
+    const first=r;
+    g[k].rows.forEach((x,n)=>{const d=String(x.p.tanggal||'').split('-'),dt=d.length===3?new Date(Date.UTC(+d[0],+d[1]-1,+d[2])):null;
+      [n+1,dt,x.p.no,x.p.project,x.p.supplier,x.i.nama,num(x.i.qty),x.i.satuan||'',num(x.i.harga),num(x.i.diskon),x.i.jumlah].forEach((v,i)=>{const c=ws.getCell(r,i+1);c.value=v;c.border=box;c.font={size:10};c.alignment={horizontal:AL[i],vertical:'middle',wrapText:i>=3&&i<=5};if(i===1)c.numFmt='dd/mm/yyyy';if(i>=8)c.numFmt=NF;if(i===6)c.numFmt='#,##0.###'});r++});
+    if(g[k].ppn){for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;const c=ws.getCell(r,6);c.value='PPN';c.font={size:10,italic:true};const v=ws.getCell(r,11);v.value=g[k].ppn;v.numFmt=NF;v.font={size:10};v.alignment={horizontal:'right'};r++}
+    if(!g[k].rows.length){band(r,'Belum ada pembelian '+k.toLowerCase()+' yang disetujui pada '+bl+'.',{font:{italic:true,size:10,color:{argb:'FF7F7F7F'}},alignment:{horizontal:'center'}});for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;r++}
+    const tot=g[k].sub+g[k].ppn;
+    band(r,'TOTAL '+k.toUpperCase(),{font:{bold:true,size:10},alignment:{horizontal:'right',vertical:'middle'},fill:fill('FFC4BD97')});
+    for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.border=box;c.fill=fill('FFC4BD97')}
+    const t=ws.getCell(r,11);t.value=g[k].rows.length?{formula:'SUM(K'+first+':K'+(r-1)+')',result:tot}:0;t.numFmt=NF;t.font={bold:true,size:10};t.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=20;totals.push('K'+r);r+=2});
+  band(r,'TOTAL PEMBELIAN '+bl.toUpperCase(),{font:{bold:true,size:11,color:{argb:'FFFFFFFF'}},alignment:{horizontal:'right',vertical:'middle'}});
+  for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.fill=fill('FF4A442A');c.border=box}
+  const gt=ws.getCell(r,11);gt.value={formula:totals.join('+'),result:g.Material.sub+g.Material.ppn+g.Inventaris.sub+g.Inventaris.ppn};gt.numFmt=NF;gt.font={bold:true,size:11,color:{argb:'FFFFFFFF'}};gt.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=22;r+=2;
+  band(r,'Dibuat '+tglShort(Date.now())+' dari Dashboard Pengajuan PO.',{font:{italic:true,size:8,color:{argb:'FF7F7F7F'}}});
+  const buf=await wb.xlsx.writeBuffer();
+  return {name:'Rekap-Pembelian-'+m+'.xlsx',blob:new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})};
+}
+async function doCSV(btn){ btn.disabled = true; try { const r = await rekapXLSX(); await saveFile(r.name, r.blob); } catch(e){ console.error(e); toast(e && e.code === 'declined' ? 'Unduhan dibatalkan.' : e && e.code ? 'Unduhan tidak tersedia di tampilan ini.' : 'Gagal membuat file Excel. Periksa koneksi internet lalu coba lagi.'); } btn.disabled = false; }
+/* ----- pengaturan (admin) ----- */
+function roleSelect(uid, cur){
+  return '<select data-role="'+esc(uid)+'"><option value="">Belum ditetapkan</option><option value="purchasing"'+(cur==='purchasing'?' selected':'')+'>Purchasing</option>'+
+    jab().map(l => '<option value="'+esc(l.id)+'"'+(cur===l.id?' selected':'')+'>'+esc(l.title)+'</option>').join('')+'</select>';
+}
+function usersHTML(){
+  return '<table><tbody>'+Object.keys(S.users).map(id => { const u = S.users[id];
+    return '<tr><td><b style="font-weight:500">'+esc(u.name||'(tanpa nama)')+'</b>'+(id===S.me.id?' <span style="color:var(--ink2)">· Anda</span>':'')+'<br><span style="font-size:11.5px;color:var(--ink2)">'+esc(u.email||'')+'</span></td><td style="width:45%">'+roleSelect(id, u.role||'')+'</td><td style="width:1%;white-space:nowrap">'+(id===S.cfg.adminUid?'<span class="st disetujui">Admin</span>':'<button class="btn sm" data-act="mkadmin" data-uid="'+esc(id)+'">Jadikan admin</button>')+'</td></tr>'; }).join('')+'</tbody></table>';
+}
+function renderUsers(){ const b = $('#usersBox'); if(b && !b.contains(document.activeElement)) b.innerHTML = usersHTML(); }
+function setHTML(){
+  const modeSel = (ri, j) => { const cur = (W.rules[ri].modes||{})[j.id] || 'none';
+    return '<select data-rm="'+ri+'" data-j="'+esc(j.id)+'">'+[['approve','Menyetujui'],['know','Mengetahui'],['none','—']].map(o => '<option value="'+o[0]+'"'+(cur===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select>'; };
+  return '<div class="chead"><h2>Jabatan (urutan persetujuan)</h2></div>'+
+    W.jabatan.map((l,i) => '<div class="lv"><span>Tingkat '+(i+1)+'</span><input type="text" data-jb="'+i+'" value="'+esc(l.title)+'" maxlength="40" placeholder="Nama jabatan"><button class="x" data-act="jbdel" data-i="'+i+'" title="Hapus">×</button></div>').join('')+
+    '<button class="btn sm" data-act="jbadd">+ Tambah jabatan</button>'+
+    '<div class="chead" style="margin-top:26px"><h2>Aturan berdasarkan nominal PO</h2></div>'+
+    '<div class="note">Tiap baris adalah satu rentang nominal. Jabatan <b>Menyetujui</b> harus menekan Setujui secara berurutan sebelum PO bisa diunduh. Jabatan <b>Mengetahui</b> tercetak di PO tetapi tidak menahan proses. Kosongkan "Sampai (Rp)" untuk rentang tanpa batas atas.</div>'+
+    '<div class="tw"><table class="mx"><thead><tr><th>Sampai (Rp)</th>'+W.jabatan.map(j => '<th>'+esc(j.title||'—')+'</th>').join('')+'<th></th></tr></thead><tbody>'+
+    W.rules.map((r,ri) => '<tr><td><input type="number" min="0" step="any" data-rmax="'+ri+'" value="'+(r.max==null?'':r.max)+'" placeholder="tanpa batas"></td>'+W.jabatan.map(j => '<td>'+modeSel(ri,j)+'</td>').join('')+'<td><button class="x" data-act="rldel" data-i="'+ri+'" title="Hapus rentang">×</button></td></tr>').join('')+
+    '</tbody></table></div>'+
+    '<div class="mfoot" style="justify-content:space-between"><button class="btn sm" data-act="rladd">+ Tambah rentang</button><button class="btn p" data-act="setsave">Simpan pengaturan</button></div>';
+}
+function vSet(){
+  if(!isAdmin()) return '<div class="card empty">Jabatan dan aturan persetujuan hanya dapat diubah oleh admin.<br><br><button class="btn" data-act="profile">Ubah profil & tanda tangan saya</button></div>';
+  if(!W) W = {jabatan: clone(jab()), rules: clone(rules())};
+  return '<div class="col"><div class="card" id="setBox">'+setHTML()+'</div>'+
+    '<div class="card"><div class="chead"><h2>Jabatan pengguna</h2></div><div class="note">Pengguna muncul di sini setelah mendaftar akun. Pilih jabatannya; perubahan langsung tersimpan.</div><div id="usersBox">'+usersHTML()+'</div></div></div>';
+}
+async function saveSettings(btn){
+  if(W.jabatan.some(j => !j.title.trim())) return toast('Nama jabatan tidak boleh kosong.');
+  const ids = W.jabatan.map(j => j.id);
+  const rs = W.rules.map(r => { const m = {}; ids.forEach(id => m[id] = (r.modes||{})[id] || 'none'); return {max: r.max==null||r.max==='' ? null : num(r.max), modes: m}; })
+    .sort((a,b) => (a.max==null?Infinity:a.max) - (b.max==null?Infinity:b.max));
+  if(rs.some(r => !Object.values(r.modes).includes('approve'))) return toast('Setiap rentang perlu minimal satu jabatan yang Menyetujui.');
+  if(rs.filter(r => r.max == null).length !== 1) return toast('Harus ada tepat satu rentang "tanpa batas" untuk nominal terbesar.');
+  if(new Set(rs.map(r => r.max)).size !== rs.length) return toast('Ada dua rentang dengan batas yang sama.');
+  btn.disabled = true;
+  const ok = await updCfg({jabatan: W.jabatan.map(j => ({id:j.id, title:j.title.trim()})), rules: rs});
+  btn.disabled = false;
+  if(ok){ W = null; toast('Pengaturan tersimpan. Berlaku untuk PO yang diajukan mulai sekarang.'); render(); }
+}
+
+/* ---------- modal ---------- */
+function closeModal(){ $('#modal').innerHTML = ''; pad = null; }
+function modal(html, small){ $('#modal').innerHTML = '<div class="ov"><div class="modal'+(small?' s':'')+'">'+html+'</div></div>'; }
+function confirmBox(title, text, label, danger, fn){
+  modal('<h2>'+esc(title)+'</h2><div class="sub">'+esc(text)+'</div><div class="mfoot"><button class="btn" data-act="close">Batal</button><button class="btn '+(danger?'d solid':'p')+'" id="cfm">'+esc(label)+'</button></div>', true);
+  $('#cfm').onclick = async () => { $('#cfm').disabled = true; await fn(); if($('#cfm')) $('#cfm').disabled = false; };
+}
+function itemRow(it, i){
+  return '<tr data-i="'+i+'"><td><input type="text" data-f="nama" value="'+esc(it.nama)+'" placeholder="Nama material"></td><td style="width:74px"><input class="n" type="number" min="0" step="any" data-f="qty" value="'+esc(it.qty)+'"></td><td style="width:76px"><input type="text" data-f="satuan" value="'+esc(it.satuan)+'" placeholder="lbr"></td><td style="width:124px"><input class="n" type="number" min="0" step="any" data-f="harga" value="'+esc(it.harga)+'"></td><td style="width:108px"><input class="n" type="number" min="0" step="any" data-f="diskon" value="'+esc(it.diskon)+'"></td><td style="width:118px" class="num" data-j></td><td style="width:130px"><input type="text" data-f="ket" value="'+esc(it.ket)+'"></td><td style="width:34px"><button class="x" data-act="rowdel" title="Hapus baris">×</button></td></tr>';
+}
+const blankItem = () => ({nama:'', qty:'', satuan:'', harga:'', diskon:'', ket:''});
+function openForm(po){
+  F = po ? clone(po) : {id:null, no:'', tanggal:today(), project:'', supplier:'', vendor:'', prioritas:'Normal', jenis:'Material', bank:'', rek:'', an:'', items:[blankItem()], ppnPct:0, catatan:DEF_NOTE, status:'draft'};
+  if(!po) F.no = nextNo(F.tanggal);
+  F.items = F.items.map(i => ({...i, diskon: num(i.diskon) ? i.diskon : ''}));
+  const had = po && (po.approvals||[]).length;
+  modal('<h2>'+(po?'Edit':'Form')+' Pengajuan PO</h2><div class="sub">Diisi oleh Purchasing. Simpan sebagai draft atau langsung ajukan untuk persetujuan.</div>'+
+    (had ? '<div class="note warn">PO ini sudah punya persetujuan. Menyimpan perubahan akan mengulang proses persetujuan dari awal.</div>' : '')+
+    '<div class="fg"><div><label>No. PO</label><input type="text" id="fNo" value="'+esc(F.no)+'" readonly></div><div><label>Tanggal</label><input type="date" id="fTgl" value="'+esc(F.tanggal)+'"></div><div><label>Prioritas</label><select id="fPri">'+['Normal','Urgent','Sangat Urgent'].map(p => '<option'+(F.prioritas===p?' selected':'')+'>'+p+'</option>').join('')+'</select></div>'+
+    '<div><label>Project</label><input type="text" id="fPro" value="'+esc(F.project)+'" placeholder="Nama project / klien"></div><div><label>Supplier</label><input type="text" id="fSup" value="'+esc(F.supplier)+'" placeholder="Nama supplier"></div><div><label>Vendor <span style="font-weight:400">(opsional)</span></label><input type="text" id="fVen" maxlength="60" list="venList" value="'+esc(F.vendor)+'" placeholder="Nama vendor"><datalist id="venList">'+[...new Set(S.pos.map(p=>String(p.vendor||'').trim()).filter(Boolean))].sort().map(v=>'<option value="'+esc(v)+'">').join('')+'</datalist></div><div><label>Jenis pembelian</label><select id="fJen"><option'+(F.jenis!=='Inventaris'?' selected':'')+'>Material</option><option'+(F.jenis==='Inventaris'?' selected':'')+'>Inventaris</option></select></div><div><label>Bank supplier</label><input type="text" id="fBank" maxlength="30" value="'+esc(F.bank)+'" placeholder="mis. BCA"></div><div><label>No. rekening supplier</label><input type="text" id="fRek" maxlength="40" inputmode="numeric" value="'+esc(F.rek)+'" placeholder="Tercetak di PO"></div><div><label>Atas nama</label><input type="text" id="fAn" maxlength="60" value="'+esc(F.an)+'" placeholder="Nama pemilik rekening"></div></div>'+
+    '<div class="tw"><table class="items" style="min-width:760px"><thead><tr><th>Nama material</th><th>Qty</th><th>Satuan</th><th>Harga satuan</th><th>Diskon (Rp)</th><th class="num">Jumlah</th><th>Keterangan</th><th></th></tr></thead><tbody id="fItems">'+F.items.map(itemRow).join('')+'</tbody></table></div>'+
+    '<button class="btn sm" data-act="rowadd" style="margin-top:8px">+ Tambah baris</button>'+
+    '<div class="tot"><div style="flex:1;min-width:240px"><label>Catatan</label><textarea id="fCat" rows="3">'+esc(F.catatan)+'</textarea><div class="flowhint" id="fFlow"></div></div><div class="sum"><div><span>Subtotal</span><b id="sSub"></b></div><div><span><input type="checkbox" id="fPpn"'+(num(F.ppnPct)?' checked':'')+' style="width:auto"> PPN 11%</span><b id="sPpn"></b></div><div class="g"><span>TOTAL</span><span id="sTot"></span></div></div></div>'+
+    '<div class="mfoot"><button class="btn" data-act="close">Batal</button><button class="btn" data-act="save" data-s="draft">Simpan draft</button><button class="btn p" data-act="save" data-s="diajukan">Ajukan persetujuan</button></div>');
+  sums();
+}
+function fillRek(){const s=$('#fSup').value.trim().toLowerCase();if(!s||$('#fRek').value.trim())return;const p=sorted().find(x=>x.rek&&String(x.supplier||'').trim().toLowerCase()===s&&x.id!==F.id);if(p){$('#fBank').value=p.bank||'';$('#fRek').value=p.rek||'';$('#fAn').value=p.an||'';toast('Rekening '+p.supplier+' diisi otomatis dari PO sebelumnya.')}}
+function readForm(){
+  F.tanggal = $('#fTgl').value || today(); F.prioritas = $('#fPri').value; F.jenis = $('#fJen').value; F.bank = $('#fBank').value.trim(); F.rek = $('#fRek').value.trim(); F.an = $('#fAn').value.trim(); F.project = $('#fPro').value.trim(); F.supplier = $('#fSup').value.trim(); F.vendor = $('#fVen').value.trim(); F.catatan = $('#fCat').value.trim(); F.ppnPct = $('#fPpn').checked ? 11 : 0;
+  F.items = [...document.querySelectorAll('#fItems tr')].map(tr => { const o = {}; tr.querySelectorAll('[data-f]').forEach(i => o[i.dataset.f] = i.value.trim()); return o; });
+}
+function sums(){
+  readForm(); const c = calc(F), f = flowFor(F);
+  document.querySelectorAll('#fItems tr').forEach((tr,i) => tr.querySelector('[data-j]').textContent = rp(c.items[i].jumlah));
+  $('#sSub').textContent = rp(c.subtotal); $('#sPpn').textContent = rp(c.ppn); $('#sTot').textContent = rp(c.total);
+  $('#fFlow').textContent = 'Alur untuk nominal ini — Menyetujui: ' + f.flow.map(l => l.title).join(' → ') + (f.knowers.length ? ' · Mengetahui: ' + f.knowers.map(l => l.title).join(', ') : '');
+}
+function submitFields(po){ const f = flowFor(po); return {flow: clone(f.flow), knowers: clone(f.knowers), knowIds: f.knowers.map(k => k.id)}; }
+async function saveForm(status, btn){
+  readForm();
+  const items = F.items.filter(i => i.nama).map(i => ({nama:i.nama, qty:num(i.qty), satuan:i.satuan, harga:num(i.harga), diskon:num(i.diskon), ket:i.ket}));
+  if(!F.project || !F.supplier) return toast('Project dan Supplier wajib diisi.');
+  if(!items.length) return toast('Isi minimal satu material.');
+  if(items.some(i => i.qty <= 0)) return toast('Qty setiap material harus lebih dari 0.');
+  const m = me(), now = Date.now(), old = F.id ? memPO(F.id) : null;
+  if(!m.name) return toast('Isi nama Anda di profil dulu (klik nama di kanan atas).');
+  const d = {no:F.no, tanggal:F.tanggal, project:F.project, supplier:F.supplier, vendor:F.vendor, prioritas:F.prioritas, jenis:F.jenis, bank:F.bank, rek:F.rek, an:F.an, items, ppnPct:F.ppnPct, catatan:F.catatan, status,
+    step:0, approvals:[], knows:[], rejected:null, flow:[], knowers:[], knowIds:[],
+    createdBy: old ? old.createdBy : S.me.id, createdAt: old ? old.createdAt : now, updatedAt: now,
+    createdName: m.name, createdSig: okSig(m.sig) ? m.sig : ''};
+  if(status === 'diajukan') Object.assign(d, submitFields(d));
+  btn.disabled = true;
+  if(await setPO(F.id || rid('p'), d)){ closeModal(); toast(status === 'diajukan' ? d.no+' diajukan ke '+d.flow[0].title+'.' : 'Draft '+d.no+' tersimpan.'); } else btn.disabled = false;
+}
+function openView(po){
+  const c = calc(po), fl = poFlow(po), kn = poKnowers(po), ap = po.approvals||[], ks = po.knows||[];
+  const steps = '<div class="step '+(po.status==='draft'?'now':'done')+'"><small>Diajukan oleh</small><b>Purchasing</b><span>'+esc(po.createdName||'-')+(po.status==='draft'?' · masih draft':'')+'</span>'+(okSig(po.createdSig)&&po.status!=='draft'?'<img src="'+po.createdSig+'" alt="">':'')+'</div>'+
+    fl.map((l,i) => { const a = ap.find(x => x.levelId === l.id), rj = po.rejected && po.rejected.levelId === l.id, now = po.status==='diajukan' && (po.step||0) === i;
+      return '<div class="step '+(a?'done':rj?'rej':now?'now':'')+'"><small>'+(fl.length===1?'Disetujui oleh':'Approval '+(i+1))+'</small><b>'+esc(l.title)+'</b><span>'+(a?'Disetujui '+esc(a.name)+' · '+tglShort(a.at):rj?'Ditolak '+esc(po.rejected.name)+' · '+tglShort(po.rejected.at):now?'Menunggu persetujuan':'Belum')+'</span>'+(a&&okSig(a.sig)?'<img src="'+a.sig+'" alt="">':'')+'</div>'; }).join('')+
+    kn.map(l => { const k = ks.find(x => x.levelId === l.id);
+      return '<div class="step '+(k?'done':'')+'"><small>Mengetahui</small><b>'+esc(l.title)+'</b><span>'+(k?'Diketahui '+esc(k.name)+' · '+tglShort(k.at):'Belum')+'</span>'+(k&&okSig(k.sig)?'<img src="'+k.sig+'" alt="">':'')+'</div>'; }).join('');
+  const id = esc(po.id); let acts = '<button class="btn" data-act="close">Tutup</button>';
+  if(canDelete(po)) acts += '<button class="btn d" data-act="del" data-id="'+id+'">Hapus</button>';
+  if(canEdit(po)) acts += '<button class="btn" data-act="edit" data-id="'+id+'">Edit</button>';
+  if(isPurch() && po.status === 'draft') acts += '<button class="btn p" data-act="submit" data-id="'+id+'">Ajukan persetujuan</button>';
+  if(canApprove(po)) acts += '<button class="btn d" data-act="reject" data-id="'+id+'">Tolak</button><button class="btn p" data-act="approve" data-id="'+id+'">Setujui</button>';
+  if(canKnow(po)) acts += '<button class="btn p" data-act="know" data-id="'+id+'">Mengetahui</button>';
+  if(po.status === 'disetujui') acts += '<button class="btn p" data-act="pdf" data-id="'+id+'">'+IC.dl+'Unduh PO (PDF)</button>';
+  modal('<div class="chead" style="margin:0"><h2>'+esc(po.no)+'</h2>'+stPill(po)+'</div>'+
+    '<div class="kv"><div><small>Tanggal</small><b>'+esc(tgl(po.tanggal))+'</b></div><div><small>Project</small><b>'+esc(po.project)+'</b></div><div><small>Supplier</small><b>'+esc(po.supplier)+'</b></div><div><small>Vendor</small><b>'+esc(po.vendor||'-')+'</b></div><div><small>Prioritas</small><b>'+esc(po.prioritas||'-')+'</b></div><div><small>Jenis</small><b>'+esc(po.jenis==='Inventaris'?'Inventaris':'Material')+'</b></div><div><small>Rekening supplier</small><b>'+esc(po.rek?[po.bank,po.rek].filter(Boolean).join(' ')+(po.an?' · a.n. '+po.an:''):'-')+'</b></div><div><small>Jumlah item</small><b>'+c.items.length+'</b></div></div>'+
+    (po.rejected ? '<div class="note warn"><b>Alasan penolakan:</b> '+esc(po.rejected.reason||'-')+'</div>' : '')+
+    '<div class="tw"><table><thead><tr><th>No</th><th>Nama material</th><th class="num">Qty</th><th>Satuan</th><th class="num">Harga satuan</th><th class="num">Diskon</th><th class="num">Jumlah</th><th>Keterangan</th></tr></thead><tbody>'+
+    c.items.map((i,n) => '<tr><td>'+(n+1)+'</td><td>'+esc(i.nama)+'</td><td class="num">'+qtyf(i.qty)+'</td><td>'+esc(i.satuan)+'</td><td class="num">'+rp(i.harga)+'</td><td class="num">'+(num(i.diskon)?rp(i.diskon):'-')+'</td><td class="num">'+rp(i.jumlah)+'</td><td>'+esc(i.ket)+'</td></tr>').join('')+'</tbody></table></div>'+
+    '<div class="tot"><div style="flex:1;min-width:220px"><label>Catatan</label>'+esc(po.catatan||'-')+'</div><div class="sum"><div><span>Subtotal</span><b>'+rp(c.subtotal)+'</b></div><div><span>PPN'+(num(po.ppnPct)?' '+num(po.ppnPct)+'%':'')+'</span><b>'+(c.ppn?rp(c.ppn):'-')+'</b></div><div class="g"><span>TOTAL</span><span>'+rp(c.total)+'</span></div></div></div>'+
+    '<label style="margin-top:18px">Alur persetujuan</label><div class="steps">'+steps+'</div>'+
+    (po.status !== 'disetujui' ? '<div class="sub" style="margin:14px 0 0">PO dapat diunduh setelah semua jabatan yang menyetujui menekan Setujui.</div>' : '')+
+    '<div class="mfoot">'+acts+'</div>');
+}
+/* tanda tangan */
+function initPad(cv, src){
+  const ctx = cv.getContext('2d'); cv.width = 600; cv.height = 250; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111';
+  pad = {cv, dirty:false, has:!!src, load(im){ctx.clearRect(0,0,600,250);const k=Math.min(600/im.width,250/im.height),w=im.width*k,h=im.height*k;ctx.drawImage(im,(600-w)/2,(250-h)/2,w,h);const d=ctx.getImageData(0,0,600,250),a=d.data;for(let i=0;i<a.length;i+=4)if(a[i]>205&&a[i+1]>205&&a[i+2]>205)a[i+3]=0;ctx.putImageData(d,0,0);this.has=this.dirty=true}, clear(){ ctx.clearRect(0,0,600,250); this.has = false; this.dirty = true; }};
+  if(src){ const im = new Image(); im.onload = () => ctx.drawImage(im,0,0,600,250); im.src = src; }
+  let on = false; const pt = e => { const r = cv.getBoundingClientRect(); return [(e.clientX-r.left)/r.width*600, (e.clientY-r.top)/r.height*250]; };
+  cv.onpointerdown = e => { on = true; cv.setPointerCapture(e.pointerId); const [x,y] = pt(e); ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+.1,y+.1); ctx.stroke(); pad.has = pad.dirty = true; };
+  cv.onpointermove = e => { if(!on) return; const [x,y] = pt(e); ctx.lineTo(x,y); ctx.stroke(); };
+  cv.onpointerup = cv.onpointercancel = () => { on = false; };
+}
+function openProfile(){
+  const m = me();
+  modal('<h2>Profil saya</h2><div class="sub">Nama dan tanda tangan ini tercetak pada PO saat Anda mengajukan, menyetujui, atau mengetahui.</div>'+
+    '<label>Nama (tercetak di PO)</label><input type="text" id="pName" maxlength="60" value="'+esc(m.name)+'" placeholder="mis. Ardiansa">'+
+    '<label style="margin-top:14px">Tanda tangan <span style="font-weight:400">— gambar di kotak atau unggah foto/scan tanda tangan (opsional)</span></label><canvas class="pad" id="pPad"></canvas><input type="file" id="pFile" accept="image/*" hidden>'+
+    '<div class="mfoot" style="justify-content:space-between"><span style="display:flex;gap:8px"><button class="btn sm" data-act="padup">Unggah gambar</button><button class="btn sm" data-act="padclear">Hapus</button></span><span style="display:flex;gap:10px"><button class="btn" data-act="close">Batal</button><button class="btn p" data-act="psave">Simpan</button></span></div>', true);
+  initPad($('#pPad'), okSig(m.sig) ? m.sig : '');
+}
+async function saveProfile(btn){
+  const name = $('#pName').value.trim(); if(!name) return toast('Nama wajib diisi.');
+  const sig = pad.dirty ? (pad.has ? pad.cv.toDataURL('image/png') : '') : (me().sig || '');
+  btn.disabled = true; if(await updUser(S.me.id, {name, sig})){ closeModal(); toast('Profil tersimpan.'); } else btn.disabled = false;
+}
+const stamp = l => ({levelId:l.id, title:l.title, by:S.me.id, name:me().name, sig: okSig(me().sig) ? me().sig : '', at:Date.now()});
+function needName(){ if(me().name) return false; toast('Isi nama Anda di profil dulu (klik nama di kanan atas).'); return true; }
+function doApprove(po){
+  if(needName()) return; const l = curLevel(po), fl = poFlow(po);
+  confirmBox('Setujui '+po.no+'?', 'Anda menyetujui sebagai '+l.title+'. Total '+rp(calc(po).total)+' — '+po.supplier+'.', 'Setujui', false, async () => {
+    const step = (po.step||0) + 1, done = step >= fl.length;
+    if(await updPO(po.id, {approvals:[...(po.approvals||[]), stamp(l)], step, status: done ? 'disetujui' : 'diajukan', updatedAt:Date.now()})){
+      closeModal(); toast(done ? po.no+' disetujui penuh — PO siap diunduh.' : po.no+' disetujui, diteruskan ke '+fl[step].title+'.'); }
+  });
+}
+function doKnow(po){
+  if(needName()) return; const l = (po.knowers||[]).find(k => k.id === myRole());
+  confirmBox('Tandai mengetahui '+po.no+'?', 'Nama dan tanda tangan Anda tercetak di kolom Mengetahui ('+l.title+'). Total '+rp(calc(po).total)+'.', 'Mengetahui', false, async () => {
+    if(await updPO(po.id, {knows:[...(po.knows||[]), stamp(l)], updatedAt:Date.now()})){ closeModal(); toast(po.no+' ditandai diketahui '+l.title+'.'); }
+  });
+}
+function doReject(po){
+  const l = curLevel(po);
+  modal('<h2>Tolak '+esc(po.no)+'?</h2><div class="sub">Purchasing dapat memperbaiki lalu mengajukan ulang.</div><label>Alasan penolakan</label><textarea id="rj" rows="3"></textarea><div class="mfoot"><button class="btn" data-act="close">Batal</button><button class="btn d solid" id="rjb">Tolak PO</button></div>', true);
+  $('#rjb').onclick = async () => { const reason = $('#rj').value.trim(); if(!reason) return toast('Tulis alasan penolakan.'); $('#rjb').disabled = true;
+    if(await updPO(po.id, {status:'ditolak', rejected:{levelId:l.id, by:S.me.id, name:me().name||l.title, reason, at:Date.now()}, updatedAt:Date.now()})){ closeModal(); toast(po.no+' ditolak.'); } else if($('#rjb')) $('#rjb').disabled = false; };
+}
+function doSubmit(po){
+  if(needName()) return; const f = flowFor(po);
+  confirmBox('Ajukan '+po.no+'?', 'PO akan dikirim ke '+f.flow[0].title+' untuk disetujui.', 'Ajukan', false, async () => {
+    const d = clone(po); delete d.id;
+    Object.assign(d, {status:'diajukan', step:0, approvals:[], knows:[], rejected:null, createdName:me().name, createdSig: okSig(me().sig) ? me().sig : '', updatedAt:Date.now()}, submitFields(po));
+    if(await setPO(po.id, d)){ closeModal(); toast(po.no+' diajukan.'); }
+  });
+}
+
+/* ---------- PDF (format Po_003 di atas kop surat) ---------- */
+function buildPDF(po){
+  const {jsPDF}=window.jspdf,doc=new jsPDF({unit:'mm',format:'a4'}),c=calc(po),fl=poFlow(po);
+  const kn=typeof knOf==='function'?knOf(po):(po.knowers||[]),ks=po.knows||[];
+  const L=20,R=190,INK=[38,50,56],MUTE=[118,128,132],ACC=[15,138,140],SOFT=[243,246,246],LINE=[218,225,226],WHITE=[255,255,255];
+  const bg=()=>doc.addImage(KOP,'JPEG',0,0,210,297,'kop','FAST');
+  const font=(st,sz,col)=>{doc.setFont('helvetica',st);doc.setFontSize(sz);doc.setTextColor(col[0],col[1],col[2])};
+  const fit=(t,w)=>{t=String(t==null?'':t);if(doc.getTextWidth(t)<=w)return t;while(t.length>1&&doc.getTextWidth(t+'…')>w)t=t.slice(0,-1);return t+'…'};
+  const cap=(t,x,y,al)=>{font('bold',6.5,MUTE);doc.text(String(t).toUpperCase(),x,y,al?{align:al}:{charSpace:.3})};
+  const hair=(x1,y,x2)=>{doc.setDrawColor(LINE[0],LINE[1],LINE[2]);doc.setLineWidth(.2);doc.line(x1,y,x2,y)};
+  /* kepala */
+  bg();
+  font('bold',20,INK);doc.text('PURCHASE ORDER',L,44);
+  font('bold',12,ACC);doc.text(String(po.no||''),R,40.5,{align:'right'});
+  font('normal',8.5,MUTE);doc.text(tgl(po.tanggal),R,45.3,{align:'right'});
+  hair(L,49,R);doc.setDrawColor(ACC[0],ACC[1],ACC[2]);doc.setLineWidth(.9);doc.line(L,49,L+22,49);
+  /* kartu info */
+  const cy=54,ch=27,cw2=82,rx=R-cw2;
+  doc.setFillColor(SOFT[0],SOFT[1],SOFT[2]);doc.roundedRect(L,cy,cw2,ch,2,2,'F');doc.roundedRect(rx,cy,cw2,ch,2,2,'F');
+  cap('Supplier',L+5,cy+6.5);font('bold',10.5,INK);doc.text(fit(po.supplier,po.vendor?36:cw2-10),L+5,cy+12.5);
+  if(po.vendor){cap('Vendor',L+45,cy+6.5);font('bold',10.5,INK);doc.text(fit(po.vendor,cw2-50),L+45,cy+12.5)}
+  if(po.rek){cap('Rekening pembayaran',L+5,cy+18);font('normal',8.5,INK);doc.text(fit([po.bank,po.rek].filter(Boolean).join('  ')+(po.an?'  ·  a.n. '+po.an:''),cw2-10),L+5,cy+22.8)}
+  [['Project',po.project,0,0],['Prioritas',po.prioritas||'-',1,0],['Jenis',po.jenis==='Inventaris'?'Inventaris':'Material',0,1],['Jumlah item',String(c.items.length),1,1]].forEach(k=>{
+    const x=rx+5+k[2]*42,y=cy+6.5+k[3]*11.5;cap(k[0],x,y);font('bold',9,INK);doc.text(fit(k[1],k[2]?30:38),x,y+5)});
+  /* tabel */
+  const Wc=[8,56,15,15,27,28,21],H=['No','Nama Material','Qty','Satuan','Harga Satuan','Jumlah','Keterangan'],X=[L];Wc.forEach(w=>X.push(X[X.length-1]+w));
+  const AL=['center','left','center','center','right','right','left'],tx=i=>AL[i]==='left'?X[i]+2:AL[i]==='right'?X[i+1]-2:X[i]+Wc[i]/2;
+  const head=y=>{doc.setFillColor(INK[0],INK[1],INK[2]);doc.roundedRect(L,y,R-L,8,1.5,1.5,'F');font('bold',7.5,WHITE);H.forEach((h,i)=>doc.text(h,tx(i),y+5.2,{align:AL[i]}));return y+8};
+  let y=head(88);
+  c.items.forEach((it,i)=>{
+    font('normal',8.5,INK);const nm=doc.splitTextToSize(String(it.nama||''),Wc[1]-4).slice(0,2),rh=nm.length>1?10.5:7;
+    if(y+rh>262){doc.addPage();bg();font('bold',9,MUTE);doc.text('PURCHASE ORDER  ·  '+po.no+'  (lanjutan)',L,42);y=head(46)}
+    if(i%2){doc.setFillColor(SOFT[0],SOFT[1],SOFT[2]);doc.rect(L,y,R-L,rh,'F')}
+    const ty=y+4.7,ket=[num(it.diskon)?'Dsc '+fnum(it.diskon):'',it.ket].filter(Boolean).join(' ');
+    font('normal',8.5,MUTE);doc.text(String(i+1),tx(0),ty,{align:'center'});
+    font('normal',8.5,INK);doc.text(nm,tx(1),ty);doc.text(qtyf(it.qty),tx(2),ty,{align:'center'});doc.text(fit(it.satuan||'',Wc[3]-3),tx(3),ty,{align:'center'});doc.text(fnum(it.harga),tx(4),ty,{align:'right'});
+    font('bold',8.5,INK);doc.text(fnum(it.jumlah),tx(5),ty,{align:'right'});
+    font('normal',7.5,MUTE);doc.text(fit(ket,Wc[6]-3),tx(6),ty);
+    y+=rh;hair(L,y,R)});
+  /* total & catatan */
+  if(y+78>270){doc.addPage();bg();font('bold',9,MUTE);doc.text('PURCHASE ORDER  ·  '+po.no+'  (lanjutan)',L,42);y=46}
+  y+=5;const ty0=y,bx=X[4]-4,vx=R-3;
+  [['Subtotal',rp(c.subtotal)],['PPN'+(num(po.ppnPct)?' '+num(po.ppnPct)+'%':''),c.ppn?rp(c.ppn):'-']].forEach(r=>{font('normal',8.5,MUTE);doc.text(r[0],bx+3,y+3.5);font('normal',8.5,INK);doc.text(r[1],vx,y+3.5,{align:'right'});y+=6});
+  y+=1;doc.setFillColor(ACC[0],ACC[1],ACC[2]);doc.roundedRect(bx,y,R-bx,10,2,2,'F');font('bold',8.5,WHITE);doc.text('TOTAL',bx+4,y+6.4);font('bold',12,WHITE);doc.text(rp(c.total),vx,y+6.8,{align:'right'});y+=10;
+  cap('Catatan',L,ty0+3.5);font('italic',8,MUTE);doc.text(doc.splitTextToSize(po.catatan||'-',bx-L-10).slice(0,4),L,ty0+8.5);
+  /* tanda tangan */
+  y+=13;cap('Persetujuan',L,y);hair(L+24,y-1,R);y+=7;
+  const cols=[{t:'Diajukan oleh',r:'Purchasing',n:po.createdName,s:po.createdSig}]
+    .concat(fl.map((l,i)=>{const a=(po.approvals||[]).find(x=>x.levelId===l.id)||{};return{t:fl.length===1?'Disetujui oleh':'Approval '+(i+1),r:l.title,n:a.name,s:a.sig,at:a.at,w:'Disetujui'}}))
+    .concat(kn.map(l=>{const k=ks.find(x=>x.levelId===l.id)||{};return{t:'Mengetahui',r:l.title,n:k.name,s:k.sig,at:k.at,w:'Diketahui'}}));
+  const cw=(R-L)/cols.length,sm=cols.length>4;
+  cols.forEach((s,i)=>{const cx=L+i*cw+cw/2,hw=Math.min(cw/2-3,22);
+    cap(s.t,cx,y,'center');
+    if(okSig(s.s)){const sw=Math.min(36,cw-6),sh=sw*5/12;try{doc.addImage(s.s,'PNG',cx-sw/2,y+2+(17-sh)/2,sw,sh)}catch(e){}}
+    else if(s.at){font('italic',6.5,MUTE);doc.text(s.w+' secara digital',cx,y+11,{align:'center'})}
+    doc.setDrawColor(INK[0],INK[1],INK[2]);doc.setLineWidth(.3);doc.line(cx-hw,y+21,cx+hw,y+21);
+    font('bold',sm?7.5:8.5,INK);doc.text(fit(s.n||'',cw-4),cx,y+25.3,{align:'center'});
+    font('normal',sm?6.5:7.5,MUTE);doc.text(fit(s.r,cw-4),cx,y+29.2,{align:'center'});
+    if(s.at){font('normal',6.5,MUTE);doc.text(tglShort(s.at),cx,y+32.8,{align:'center'})}});
+  return doc;
+}
+function doPDF(po){
+  if(po.status !== 'disetujui') return toast('PO baru bisa diunduh setelah disetujui.');
+  if(!window.jspdf) return toast('Pembuat PDF gagal dimuat. Muat ulang halaman lalu coba lagi.');
+  let blob; try { blob = buildPDF(po).output('blob'); } catch(e){ console.error(e); return toast('Gagal membuat PDF.'); }
+  saveFile(String(po.no).replace(/[^\w.-]+/g,'_') + '.pdf', blob).catch(e => toast(e && e.code === 'declined' ? 'Unduhan dibatalkan.' : 'Unduhan tidak tersedia di tampilan ini.'));
+}
+
+/* ---------- peristiwa ---------- */
+const redrawSet = () => { $('#setBox').innerHTML = setHTML(); };
+document.addEventListener('submit', e => { if(e.target.id === 'gateForm'){ e.preventDefault(); gateSubmit(); } });
+document.addEventListener('click', e => {
+  const g = e.target.closest('[data-go]'); if(g){ location.hash = g.dataset.go; return; }
+  const b = e.target.closest('[data-act]'); if(!b) return;
+  const a = b.dataset.act, po = b.dataset.id ? memPO(b.dataset.id) : null;
+  if(b.dataset.id && !po) return toast('PO tidak ditemukan.');
+  if(a === 'close') closeModal();
+  else if(a === 'gswitch'){ S.gate = S.gate === 'login' ? 'daftar' : 'login'; render(); }
+  else if(a === 'greset'){ const em = $('#gEmail').value.trim(); if(!em) return toast('Isi email Anda dulu.'); auth.sendPasswordResetEmail(em).then(() => toast('Tautan atur ulang kata sandi dikirim ke '+em+'.')).catch(er => toast(AUTH_MSG[er.code] || 'Gagal mengirim tautan.')); }
+  else if(a === 'logout'){ if(auth) auth.signOut(); else toast('Mode demo tidak memakai login.'); }
+  else if(a === 'golist') location.hash = 'pengajuan';
+  else if(a === 'goappr') location.hash = 'persetujuan';
+  else if(a === 'new') openForm(null);
+  else if(a === 'view') openView(po);
+  else if(a === 'edit') openForm(po);
+  else if(a === 'del') confirmBox('Hapus '+po.no+'?', 'Pengajuan ini akan dihapus permanen.', 'Hapus', true, async () => { if(await delPO(po.id)){ closeModal(); toast(po.no+' dihapus.'); } });
+  else if(a === 'submit') doSubmit(po);
+  else if(a === 'approve') doApprove(po);
+  else if(a === 'reject') doReject(po);
+  else if(a === 'know') doKnow(po);
+  else if(a === 'pdf') doPDF(po);
+  else if(a === 'save') saveForm(b.dataset.s, b);
+  else if(a === 'rowadd'){ readForm(); F.items.push(blankItem()); $('#fItems').innerHTML = F.items.map(itemRow).join(''); sums(); }
+  else if(a === 'rowdel'){ readForm(); if(F.items.length > 1){ F.items.splice(+b.closest('tr').dataset.i, 1); $('#fItems').innerHTML = F.items.map(itemRow).join(''); sums(); } }
+  else if(a === 'profile') openProfile();
+  else if(a === 'padclear'){ if(pad) pad.clear(); }
+  else if(a === 'padup') $('#pFile').click();
+  else if(a === 'csv') doCSV(b);
+  else if(a === 'psave') saveProfile(b);
+  else if(a === 'jbadd'){ if(W.jabatan.length >= 6) return toast('Maksimal 6 jabatan.'); const id = rid('j'); W.jabatan.push({id, title:''}); W.rules.forEach(r => r.modes[id] = 'none'); redrawSet(); }
+  else if(a === 'jbdel'){ if(W.jabatan.length <= 1) return toast('Minimal satu jabatan.'); const j = W.jabatan.splice(+b.dataset.i, 1)[0]; W.rules.forEach(r => delete r.modes[j.id]); redrawSet(); }
+  else if(a === 'rladd'){ const m = {}; W.jabatan.forEach(j => m[j.id] = 'none'); W.rules.splice(Math.max(W.rules.length-1,0), 0, {max:0, modes:m}); redrawSet(); }
+  else if(a === 'rldel'){ if(W.rules.length <= 1) return toast('Minimal satu rentang.'); W.rules.splice(+b.dataset.i, 1); redrawSet(); }
+  else if(a === 'setsave') saveSettings(b);
+  else if(a === 'mkadmin'){ const uid = b.dataset.uid, u = S.users[uid] || {}; confirmBox('Pindahkan admin ke '+(u.name||u.email||'pengguna ini')+'?', 'Admin hanya satu. Setelah dipindahkan, Anda tidak lagi bisa membuka Pengaturan; hanya admin baru yang bisa mengembalikannya.', 'Pindahkan admin', true, async () => { if(await updCfg({adminUid: uid})){ W = null; closeModal(); toast('Admin dipindahkan.'); render(); } }); }
+});
+document.addEventListener('input', e => {
+  const t = e.target;
+  if(t.id === 'q'){ S.q = t.value; $('#listBody').innerHTML = poTable(filtered(), true, 'Tidak ada PO yang cocok.'); }
+  else if(t.closest('#fItems') || t.id === 'fPpn') sums();
+  else if(t.dataset.jb != null) W.jabatan[+t.dataset.jb].title = t.value;
+  else if(t.dataset.rmax != null) W.rules[+t.dataset.rmax].max = t.value === '' ? null : num(t.value);
+});
+document.addEventListener('change', e => {
+  const t = e.target;
+  if(t.id === 'pFile'){ const f = t.files[0]; if(!f || !pad) return; const im = new Image(); im.onload = () => { pad.load(im); URL.revokeObjectURL(im.src); }; im.onerror = () => toast('Gambar tidak bisa dibaca. Pakai PNG atau JPG.'); im.src = URL.createObjectURL(f); t.value = ''; }
+  else if(t.id === 'fs'){ S.fs = t.value; render(); }
+  else if(t.id === 'rm'){ S.rm = t.value; render(); }
+  else if(t.id === 'fSup') fillRek();
+  else if(t.id === 'fTgl' && F && !F.id){ $('#fNo').value = F.no = nextNo(t.value || today()); }
+  else if(t.dataset.rm != null) W.rules[+t.dataset.rm].modes[t.dataset.j] = t.value;
+  else if(t.dataset.jb != null) redrawSet();
+  else if(t.dataset.role != null) updUser(t.dataset.role, {role: t.value}).then(ok => ok && toast('Jabatan diperbarui.'));
+});
+init();
