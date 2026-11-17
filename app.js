@@ -46,7 +46,8 @@ const okSig = s => typeof s === 'string' && s.startsWith('data:image/png;base64,
 function calc(po){
   const items = (po.items||[]).map(i => ({...i, jumlah: num(i.qty)*num(i.harga) - num(i.diskon)}));
   const subtotal = items.reduce((a,i) => a+i.jumlah, 0), ppn = Math.round(subtotal*num(po.ppnPct)/100);
-  return {items, subtotal, ppn, total: subtotal+ppn};
+  const ongkir = Math.max(0, num(po.ongkir));
+  return {items, subtotal, ppn, ongkir, total: subtotal+ppn+ongkir};
 }
 function toast(t){ const b = $('#toastBox'); b.innerHTML = '<div class="toast">'+esc(t)+'</div>'; clearTimeout(toast.t); toast.t = setTimeout(() => b.innerHTML = '', 4000); }
 
@@ -122,7 +123,7 @@ const updUser = (uid,patch) => write(() => fs.collection('users').doc(uid).updat
 const updCfg = patch => write(() => fs.collection('config').doc('app').update(patch), () => Object.assign(S.cfg, patch));
 
 /* ---------- mulai ---------- */
-const VERSION = '17.11-d';
+const VERSION = '17.11-e';
 function init(){
   const bs = document.querySelector('.brand small'); if(bs) bs.textContent = 'Purchase Order · v' + VERSION;
   route();
@@ -279,21 +280,22 @@ function vAppr(){
 }
 /* ----- rekap pembelian bulanan ----- */
 function rekap(){
-  const m=S.rm||today().slice(0,7),g={Material:{rows:[],sub:0,ppn:0},Inventaris:{rows:[],sub:0,ppn:0}};
+  const m=S.rm||today().slice(0,7),g={Material:{rows:[],sub:0,ppn:0,ong:0},Inventaris:{rows:[],sub:0,ppn:0,ong:0}};
   S.pos.filter(p=>done(p)&&String(p.tanggal||'').slice(0,7)===m)
     .sort((a,b)=>String(a.tanggal).localeCompare(String(b.tanggal))||String(a.no).localeCompare(String(b.no)))
-    .forEach(p=>{const c=calc(p),k=g[p.jenis==='Inventaris'?'Inventaris':'Material'];c.items.forEach(i=>k.rows.push({p,i}));k.sub+=c.subtotal;k.ppn+=c.ppn});
+    .forEach(p=>{const c=calc(p),k=g[p.jenis==='Inventaris'?'Inventaris':'Material'];c.items.forEach(i=>k.rows.push({p,i}));k.sub+=c.subtotal;k.ppn+=c.ppn;k.ong+=c.ongkir});
   return {m,g};
 }
 const blnLabel=m=>BULAN[+m.slice(5,7)-1]+' '+m.slice(0,4);
 function vRekap(){
-  const {m,g}=rekap(),tot=k=>g[k].sub+g[k].ppn;
+  const {m,g}=rekap(),tot=k=>g[k].sub+g[k].ppn+g[k].ong;
   const months=[...new Set(S.pos.map(p=>String(p.tanggal||'').slice(0,7)).filter(x=>/^\d{4}-\d{2}$/.test(x)).concat(today().slice(0,7),m))].sort().reverse();
   const tile=(c,ic,l,v)=>'<div class="card tile"><div class="ticon '+c+'">'+ic+'</div><div><small>'+l+'</small><strong style="font-size:20px">'+rp(v)+'</strong></div></div>';
   const sec=k=>'<div class="card"><div class="chead"><h2>'+k+' · '+g[k].rows.length+' item</h2><b style="font-weight:600">'+rp(tot(k))+'</b></div>'+(g[k].rows.length?
     '<div class="tw"><table><thead><tr><th>Tgl</th><th>No. PO</th><th>Barang</th><th class="num">Qty</th><th class="num">Jumlah</th></tr></thead><tbody>'+
     g[k].rows.map(r=>'<tr><td style="white-space:nowrap">'+esc(String(r.p.tanggal||'').slice(8,10)+'/'+String(r.p.tanggal||'').slice(5,7))+'</td><td><button class="pono" data-act="view" data-id="'+esc(r.p.id)+'">'+esc(r.p.no)+'</button></td><td>'+esc(r.i.nama)+'<br><span style="font-size:11.5px;color:var(--ink2)">'+esc(r.p.supplier)+' · '+esc(r.p.project)+'</span></td><td class="num">'+qtyf(r.i.qty)+' '+esc(r.i.satuan)+'</td><td class="num">'+rp(r.i.jumlah)+'</td></tr>').join('')+
     (g[k].ppn?'<tr><td colspan="4" class="num">PPN</td><td class="num">'+rp(g[k].ppn)+'</td></tr>':'')+
+    (g[k].ong?'<tr><td colspan="4" class="num">Ongkos kirim</td><td class="num">'+rp(g[k].ong)+'</td></tr>':'')+
     '<tr><td colspan="4" class="num"><b>Total '+k+'</b></td><td class="num"><b>'+rp(tot(k))+'</b></td></tr></tbody></table></div>'
     :'<div class="empty">Belum ada pembelian '+k.toLowerCase()+' yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>';
   return '<div class="col"><div class="card"><div class="chead" style="margin:0"><div class="filters"><select id="rm">'+months.map(x=>'<option value="'+x+'"'+(x===m?' selected':'')+'>'+blnLabel(x)+'</option>').join('')+'</select></div><button class="btn" data-act="csv">'+IC.dl+'Unduh rekap (Excel)</button></div>'+
@@ -312,7 +314,7 @@ async function rekapXLSX(){
   let r=1;
   band(r,'SEMBILAN PULUH INTERIOR',{font:{bold:true,size:14,color:{argb:'FF1F3864'}}});ws.getRow(r).height=22;r++;
   band(r,'REKAP PEMBELIAN — '+bl.toUpperCase(),{font:{bold:true,size:12}});r++;
-  band(r,'Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Jumlah sudah dipotong diskon.',{font:{italic:true,size:9,color:{argb:'FF7F7F7F'}}});r+=2;
+  band(r,'Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Jumlah sudah dipotong diskon; ongkos kirim dicatat terpisah.',{font:{italic:true,size:9,color:{argb:'FF7F7F7F'}}});r+=2;
   const totals=[];
   ['Material','Inventaris'].forEach(k=>{
     band(r,k.toUpperCase()+'  ·  '+g[k].rows.length+' item',{font:{bold:true,size:11}});r++;
@@ -320,15 +322,15 @@ async function rekapXLSX(){
     const first=r;
     g[k].rows.forEach((x,n)=>{const d=String(x.p.tanggal||'').split('-'),dt=d.length===3?new Date(Date.UTC(+d[0],+d[1]-1,+d[2])):null;
       [n+1,dt,x.p.no,x.p.project,x.p.supplier,x.i.nama,num(x.i.qty),x.i.satuan||'',num(x.i.harga),num(x.i.diskon),x.i.jumlah].forEach((v,i)=>{const c=ws.getCell(r,i+1);c.value=v;c.border=box;c.font={size:10};c.alignment={horizontal:AL[i],vertical:'middle',wrapText:i>=3&&i<=5};if(i===1)c.numFmt='dd/mm/yyyy';if(i>=8)c.numFmt=NF;if(i===6)c.numFmt='#,##0.###'});r++});
-    if(g[k].ppn){for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;const c=ws.getCell(r,6);c.value='PPN';c.font={size:10,italic:true};const v=ws.getCell(r,11);v.value=g[k].ppn;v.numFmt=NF;v.font={size:10};v.alignment={horizontal:'right'};r++}
+    [['PPN',g[k].ppn],['Ongkos kirim',g[k].ong]].forEach(x=>{if(!x[1])return;for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;const c=ws.getCell(r,6);c.value=x[0];c.font={size:10,italic:true};const v=ws.getCell(r,11);v.value=x[1];v.numFmt=NF;v.font={size:10};v.alignment={horizontal:'right'};r++});
     if(!g[k].rows.length){band(r,'Belum ada pembelian '+k.toLowerCase()+' yang disetujui pada '+bl+'.',{font:{italic:true,size:10,color:{argb:'FF7F7F7F'}},alignment:{horizontal:'center'}});for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;r++}
-    const tot=g[k].sub+g[k].ppn;
+    const tot=g[k].sub+g[k].ppn+g[k].ong;
     band(r,'TOTAL '+k.toUpperCase(),{font:{bold:true,size:10},alignment:{horizontal:'right',vertical:'middle'},fill:fill('FFC4BD97')});
     for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.border=box;c.fill=fill('FFC4BD97')}
     const t=ws.getCell(r,11);t.value=g[k].rows.length?{formula:'SUM(K'+first+':K'+(r-1)+')',result:tot}:0;t.numFmt=NF;t.font={bold:true,size:10};t.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=20;totals.push('K'+r);r+=2});
   band(r,'TOTAL PEMBELIAN '+bl.toUpperCase(),{font:{bold:true,size:11,color:{argb:'FFFFFFFF'}},alignment:{horizontal:'right',vertical:'middle'}});
   for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.fill=fill('FF4A442A');c.border=box}
-  const gt=ws.getCell(r,11);gt.value={formula:totals.join('+'),result:g.Material.sub+g.Material.ppn+g.Inventaris.sub+g.Inventaris.ppn};gt.numFmt=NF;gt.font={bold:true,size:11,color:{argb:'FFFFFFFF'}};gt.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=22;r+=2;
+  const gt=ws.getCell(r,11);gt.value={formula:totals.join('+'),result:g.Material.sub+g.Material.ppn+g.Material.ong+g.Inventaris.sub+g.Inventaris.ppn+g.Inventaris.ong};gt.numFmt=NF;gt.font={bold:true,size:11,color:{argb:'FFFFFFFF'}};gt.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=22;r+=2;
   band(r,'Dibuat '+tglShort(Date.now())+' dari Dashboard Pengajuan PO.',{font:{italic:true,size:8,color:{argb:'FF7F7F7F'}}});
   const buf=await wb.xlsx.writeBuffer();
   return {name:'Rekap-Pembelian-'+m+'.xlsx',blob:new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})};
@@ -389,7 +391,7 @@ function itemRow(it, i){
 }
 const blankItem = () => ({nama:'', qty:'', satuan:'', harga:'', diskon:'', ket:''});
 function openForm(po){
-  F = po ? clone(po) : {id:null, no:'', tanggal:today(), project:'', supplier:'', vendor:'', prioritas:'Normal', jenis:'Material', bank:'', rek:'', an:'', items:[blankItem()], ppnPct:0, catatan:DEF_NOTE, status:'draft'};
+  F = po ? clone(po) : {id:null, no:'', tanggal:today(), project:'', supplier:'', vendor:'', prioritas:'Normal', jenis:'Material', bank:'', rek:'', an:'', items:[blankItem()], ppnPct:0, ongkir:0, catatan:DEF_NOTE, status:'draft'};
   if(!po) F.no = nextNo(F.tanggal);
   F.items = F.items.map(i => ({...i, diskon: num(i.diskon) ? i.diskon : ''}));
   const had = po && (po.approvals||[]).length;
@@ -399,13 +401,13 @@ function openForm(po){
     '<div><label>Project</label><input type="text" id="fPro" value="'+esc(F.project)+'" placeholder="Nama project / klien"></div><div><label>Supplier</label><input type="text" id="fSup" value="'+esc(F.supplier)+'" placeholder="Nama supplier"></div><div><label>Vendor <span style="font-weight:400">(opsional)</span></label><input type="text" id="fVen" maxlength="60" list="venList" value="'+esc(F.vendor)+'" placeholder="Nama vendor"><datalist id="venList">'+[...new Set(S.pos.map(p=>String(p.vendor||'').trim()).filter(Boolean))].sort().map(v=>'<option value="'+esc(v)+'">').join('')+'</datalist></div><div><label>Jenis pembelian</label><select id="fJen"><option'+(F.jenis!=='Inventaris'?' selected':'')+'>Material</option><option'+(F.jenis==='Inventaris'?' selected':'')+'>Inventaris</option></select></div><div><label>Bank supplier</label><input type="text" id="fBank" maxlength="30" value="'+esc(F.bank)+'" placeholder="mis. BCA"></div><div><label>No. rekening supplier</label><input type="text" id="fRek" maxlength="40" inputmode="numeric" value="'+esc(F.rek)+'" placeholder="Tercetak di PO"></div><div><label>Atas nama</label><input type="text" id="fAn" maxlength="60" value="'+esc(F.an)+'" placeholder="Nama pemilik rekening"></div></div>'+
     '<div class="tw"><table class="items" style="min-width:760px"><thead><tr><th>Nama material</th><th>Qty</th><th>Satuan</th><th>Harga satuan</th><th>Diskon (Rp)</th><th class="num">Jumlah</th><th>Keterangan</th><th></th></tr></thead><tbody id="fItems">'+F.items.map(itemRow).join('')+'</tbody></table></div>'+
     '<button class="btn sm" data-act="rowadd" style="margin-top:8px">+ Tambah baris</button>'+
-    '<div class="tot"><div style="flex:1;min-width:240px"><label>Catatan</label><textarea id="fCat" rows="3">'+esc(F.catatan)+'</textarea><div class="flowhint" id="fFlow"></div></div><div class="sum"><div><span>Subtotal</span><b id="sSub"></b></div><div><span><input type="checkbox" id="fPpn"'+(num(F.ppnPct)?' checked':'')+' style="width:auto"> PPN 11%</span><b id="sPpn"></b></div><div class="g"><span>TOTAL</span><span id="sTot"></span></div></div></div>'+
+    '<div class="tot"><div style="flex:1;min-width:240px"><label>Catatan</label><textarea id="fCat" rows="3">'+esc(F.catatan)+'</textarea><div class="flowhint" id="fFlow"></div></div><div class="sum"><div><span>Subtotal</span><b id="sSub"></b></div><div><span><input type="checkbox" id="fPpn"'+(num(F.ppnPct)?' checked':'')+' style="width:auto"> PPN 11%</span><b id="sPpn"></b></div><div style="align-items:center"><span>Ongkos kirim</span><input class="n" type="number" min="0" step="any" id="fOng" value="'+(num(F.ongkir)||'')+'" placeholder="0" style="width:150px;text-align:right;padding:6px 10px"></div><div class="g"><span>TOTAL</span><span id="sTot"></span></div></div></div>'+
     '<div class="mfoot"><button class="btn" data-act="close">Batal</button><button class="btn" data-act="save" data-s="draft">Simpan draft</button><button class="btn p" data-act="save" data-s="diajukan">Ajukan persetujuan</button></div>');
   sums();
 }
 function fillRek(){const s=$('#fSup').value.trim().toLowerCase();if(!s||$('#fRek').value.trim())return;const p=sorted().find(x=>x.rek&&String(x.supplier||'').trim().toLowerCase()===s&&x.id!==F.id);if(p){$('#fBank').value=p.bank||'';$('#fRek').value=p.rek||'';$('#fAn').value=p.an||'';toast('Rekening '+p.supplier+' diisi otomatis dari PO sebelumnya.')}}
 function readForm(){
-  F.no = $('#fNo').value.trim(); F.tanggal = $('#fTgl').value || today(); F.prioritas = $('#fPri').value; F.jenis = $('#fJen').value; F.bank = $('#fBank').value.trim(); F.rek = $('#fRek').value.trim(); F.an = $('#fAn').value.trim(); F.project = $('#fPro').value.trim(); F.supplier = $('#fSup').value.trim(); F.vendor = $('#fVen').value.trim(); F.catatan = $('#fCat').value.trim(); F.ppnPct = $('#fPpn').checked ? 11 : 0;
+  F.no = $('#fNo').value.trim(); F.tanggal = $('#fTgl').value || today(); F.prioritas = $('#fPri').value; F.jenis = $('#fJen').value; F.bank = $('#fBank').value.trim(); F.rek = $('#fRek').value.trim(); F.an = $('#fAn').value.trim(); F.project = $('#fPro').value.trim(); F.supplier = $('#fSup').value.trim(); F.vendor = $('#fVen').value.trim(); F.catatan = $('#fCat').value.trim(); F.ppnPct = $('#fPpn').checked ? 11 : 0; F.ongkir = Math.max(0, num($('#fOng').value));
   F.items = [...document.querySelectorAll('#fItems tr')].map(tr => { const o = {}; tr.querySelectorAll('[data-f]').forEach(i => o[i.dataset.f] = i.value.trim()); return o; });
 }
 function sums(){
@@ -425,7 +427,7 @@ async function saveForm(status, btn){
   if(items.some(i => i.qty <= 0)) return toast('Qty setiap material harus lebih dari 0.');
   const m = me(), now = Date.now(), old = F.id ? memPO(F.id) : null;
   if(!m.name) return toast('Isi nama Anda di profil dulu (klik nama di kanan atas).');
-  const d = {no:F.no, tanggal:F.tanggal, project:F.project, supplier:F.supplier, vendor:F.vendor, prioritas:F.prioritas, jenis:F.jenis, bank:F.bank, rek:F.rek, an:F.an, items, ppnPct:F.ppnPct, catatan:F.catatan, status,
+  const d = {no:F.no, tanggal:F.tanggal, project:F.project, supplier:F.supplier, vendor:F.vendor, prioritas:F.prioritas, jenis:F.jenis, bank:F.bank, rek:F.rek, an:F.an, items, ppnPct:F.ppnPct, ongkir:F.ongkir, catatan:F.catatan, status,
     step:0, approvals:[], knows:[], rejected:null, flow:[], knowers:[], knowIds:[],
     createdBy: old ? old.createdBy : S.me.id, createdAt: old ? old.createdAt : now, updatedAt: now,
     createdName: m.name, createdSig: okSig(m.sig) ? m.sig : ''};
@@ -453,7 +455,7 @@ function openView(po){
     (po.rejected ? '<div class="note warn"><b>Alasan penolakan:</b> '+esc(po.rejected.reason||'-')+'</div>' : '')+
     '<div class="tw"><table><thead><tr><th>No</th><th>Nama material</th><th class="num">Qty</th><th>Satuan</th><th class="num">Harga satuan</th><th class="num">Diskon</th><th class="num">Jumlah</th><th>Keterangan</th></tr></thead><tbody>'+
     c.items.map((i,n) => '<tr><td>'+(n+1)+'</td><td>'+esc(i.nama)+'</td><td class="num">'+qtyf(i.qty)+'</td><td>'+esc(i.satuan)+'</td><td class="num">'+rp(i.harga)+'</td><td class="num">'+(num(i.diskon)?rp(i.diskon):'-')+'</td><td class="num">'+rp(i.jumlah)+'</td><td>'+esc(i.ket)+'</td></tr>').join('')+'</tbody></table></div>'+
-    '<div class="tot"><div style="flex:1;min-width:220px"><label>Catatan</label>'+esc(po.catatan||'-')+'</div><div class="sum"><div><span>Subtotal</span><b>'+rp(c.subtotal)+'</b></div><div><span>PPN'+(num(po.ppnPct)?' '+num(po.ppnPct)+'%':'')+'</span><b>'+(c.ppn?rp(c.ppn):'-')+'</b></div><div class="g"><span>TOTAL</span><span>'+rp(c.total)+'</span></div></div></div>'+
+    '<div class="tot"><div style="flex:1;min-width:220px"><label>Catatan</label>'+esc(po.catatan||'-')+'</div><div class="sum"><div><span>Subtotal</span><b>'+rp(c.subtotal)+'</b></div><div><span>PPN'+(num(po.ppnPct)?' '+num(po.ppnPct)+'%':'')+'</span><b>'+(c.ppn?rp(c.ppn):'-')+'</b></div>'+(c.ongkir?'<div><span>Ongkos kirim</span><b>'+rp(c.ongkir)+'</b></div>':'')+'<div class="g"><span>TOTAL</span><span>'+rp(c.total)+'</span></div></div></div>'+
     '<label style="margin-top:18px">Alur persetujuan</label><div class="steps">'+steps+'</div>'+
     (!done(po) ? '<div class="sub" style="margin:14px 0 0">PO dapat diunduh setelah semua jabatan yang menyetujui menekan Setujui dan semua jabatan yang mengetahui menekan Mengetahui.</div>' : '')+
     '<div class="mfoot">'+acts+'</div>');
@@ -582,7 +584,7 @@ function buildPDF(po){
   /* total & catatan */
   if(y+78>270){doc.addPage();bg();font('bold',9,MUTE);doc.text('PURCHASE ORDER  ·  '+po.no+'  (lanjutan)',L,42);y=46}
   y+=5;const ty0=y,bx=X[4]-4,vx=R-3;
-  [['Subtotal',rp(c.subtotal)],['PPN'+(num(po.ppnPct)?' '+num(po.ppnPct)+'%':''),c.ppn?rp(c.ppn):'-']].forEach(r=>{font('normal',8.5,MUTE);doc.text(r[0],bx+3,y+3.5);font('normal',8.5,INK);doc.text(r[1],vx,y+3.5,{align:'right'});y+=6});
+  [['Subtotal',rp(c.subtotal)],['PPN'+(num(po.ppnPct)?' '+num(po.ppnPct)+'%':''),c.ppn?rp(c.ppn):'-']].concat(c.ongkir?[['Ongkos kirim',rp(c.ongkir)]]:[]).forEach(r=>{font('normal',8.5,MUTE);doc.text(r[0],bx+3,y+3.5);font('normal',8.5,INK);doc.text(r[1],vx,y+3.5,{align:'right'});y+=6});
   y+=1;doc.setFillColor(ACC[0],ACC[1],ACC[2]);doc.roundedRect(bx,y,R-bx,10,2,2,'F');font('bold',8.5,WHITE);doc.text('TOTAL',bx+4,y+6.4);font('bold',12,WHITE);doc.text(rp(c.total),vx,y+6.8,{align:'right'});y+=10;
   cap('Catatan',L,ty0+3.5);font('italic',8,MUTE);doc.text(doc.splitTextToSize(po.catatan||'-',bx-L-10).slice(0,4),L,ty0+8.5);
   /* tanda tangan */
@@ -650,7 +652,7 @@ document.addEventListener('input', e => {
   const t = e.target;
   if(t.id === 'q'){ S.q = t.value; $('#listBody').innerHTML = poTable(filtered(), true, 'Tidak ada PO yang cocok.'); }
   else if(t.id === 'fNo'){ if(F) F.noEdited = true; }
-  else if(t.closest('#fItems') || t.id === 'fPpn') sums();
+  else if(t.closest('#fItems') || t.id === 'fPpn' || t.id === 'fOng') sums();
   else if(t.dataset.jb != null) W.jabatan[+t.dataset.jb].title = t.value;
   else if(t.dataset.rmax != null) W.rules[+t.dataset.rmax].max = t.value === '' ? null : num(t.value);
 });
