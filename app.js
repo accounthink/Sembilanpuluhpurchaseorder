@@ -68,11 +68,25 @@ const myRole = () => me().role || '';
 const isAdmin = () => !!S.me.id && S.cfg.adminUid === S.me.id;
 const roleName = r => r === 'purchasing' ? 'Purchasing' : ((jab().find(l => l.id === r) || {}).title || 'Belum ada jabatan');
 const isPurch = () => myRole() === 'purchasing';
+const canRekap = () => isAdmin() || isPurch();
 const poFlow = po => (po.status !== 'draft' && Array.isArray(po.flow) && po.flow.length) ? po.flow : flowFor(po).flow;
 const poKnowers = po => po.status !== 'draft' ? (po.knowers || []) : flowFor(po).knowers;
 const curLevel = po => po.status === 'diajukan' ? poFlow(po)[po.step||0] : null;
 const canApprove = po => { const l = curLevel(po); return !!l && myRole() === l.id; };
-const canKnow = po => (po.status === 'diajukan' || po.status === 'disetujui') && (po.knowIds||[]).includes(myRole()) && !(po.knows||[]).some(k => k.levelId === myRole());
+const sameName = (a,b) => !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+// Orang yang sama dengan salah satu penyetuju PO ini (akun yang sama, atau nama yang sama di akun lain)?
+const isApprover = (po, uid, name) => (po.approvals||[]).some(a => a.by === uid || sameName(a.name, name));
+const canKnow = po => (po.status === 'diajukan' || po.status === 'disetujui') && (po.knowIds||[]).includes(myRole()) && !(po.knows||[]).some(k => k.levelId === myRole()) && !isApprover(po, S.me.id, me().name);
+// Kolom "Mengetahui" yang ditampilkan: dilewati bila orangnya sudah menandatangani sebagai penyetuju.
+function shownKnowers(po){
+  const ks = po.knows || [];
+  return poKnowers(po).filter(l => {
+    const k = ks.find(x => x.levelId === l.id);
+    if(k) return !isApprover(po, k.by, k.name);
+    const holders = Object.keys(S.users).filter(u => S.users[u].role === l.id);
+    return !(holders.length && holders.every(u => isApprover(po, u, S.users[u].name)));
+  });
+}
 const canEdit = po => isPurch() && po.status !== 'disetujui';
 const canDelete = po => (isPurch() && po.status !== 'disetujui') || isAdmin();
 const stLabel = po => po.status === 'draft' ? 'Draft' : po.status === 'disetujui' ? 'Disetujui' : po.status === 'ditolak' ? 'Ditolak' : 'Menunggu ' + ((curLevel(po)||{}).title || '');
@@ -186,7 +200,7 @@ function render(){
   if(!inApp){ const key = S.auth + S.gate; if(g.dataset.k !== key){ g.dataset.k = key; g.innerHTML = gateHTML(); } return; }
   g.dataset.k = ''; g.innerHTML = '';
   const pm = pendingMine().length, nm = me().name || '';
-  $('#nav').innerHTML = Object.keys(VIEWS).map((k,i) => (k==='pengaturan'?'<hr>':'')+'<button class="nav'+(S.view===k?' on':'')+'" data-go="'+k+'">'+IC[k]+'<span>'+VIEWS[k]+'</span>'+(k==='persetujuan'&&pm?'<span class="cnt">'+pm+'</span>':'')+'</button>').join('');
+  $('#nav').innerHTML = Object.keys(VIEWS).filter(k => k !== 'rekap' || canRekap()).map((k,i) => (k==='pengaturan'?'<hr>':'')+'<button class="nav'+(S.view===k?' on':'')+'" data-go="'+k+'">'+IC[k]+'<span>'+VIEWS[k]+'</span>'+(k==='persetujuan'&&pm?'<span class="cnt">'+pm+'</span>':'')+'</button>').join('');
   $('#hello').textContent = 'Selamat datang' + (nm ? ', '+nm : '') + ' 👋';
   $('#title').textContent = VIEWS[S.view];
   $('#ava').textContent = (nm||'?').charAt(0).toUpperCase();
@@ -199,6 +213,7 @@ function render(){
   const v = $('#view');
   if(!S.loaded){ v.innerHTML = '<div class="card empty">Memuat data…</div>'; return; }
   if(S.view === 'pengaturan' && isAdmin() && W && v.querySelector('#setBox')) { renderUsers(); return; } // jangan timpa isian yang belum disimpan
+  if(S.view === 'rekap' && !canRekap()){ v.innerHTML = '<div class="card empty">Rekap Pembelian hanya dapat dilihat oleh Admin dan Purchasing.</div>'; return; }
   v.innerHTML = ({dashboard:vDash, pengajuan:vList, persetujuan:vAppr, rekap:vRekap, pengaturan:vSet})[S.view]();
 }
 function rowActs(po){
@@ -405,7 +420,7 @@ async function saveForm(status, btn){
   if(await setPO(F.id || rid('p'), d)){ closeModal(); toast(status === 'diajukan' ? d.no+' diajukan ke '+d.flow[0].title+'.' : 'Draft '+d.no+' tersimpan.'); } else btn.disabled = false;
 }
 function openView(po){
-  const c = calc(po), fl = poFlow(po), kn = poKnowers(po), ap = po.approvals||[], ks = po.knows||[];
+  const c = calc(po), fl = poFlow(po), kn = shownKnowers(po), ap = po.approvals||[], ks = po.knows||[];
   const steps = '<div class="step '+(po.status==='draft'?'now':'done')+'"><small>Diajukan oleh</small><b>Purchasing</b><span>'+esc(po.createdName||'-')+(po.status==='draft'?' · masih draft':'')+'</span>'+(okSig(po.createdSig)&&po.status!=='draft'?'<img src="'+po.createdSig+'" alt="">':'')+'</div>'+
     fl.map((l,i) => { const a = ap.find(x => x.levelId === l.id), rj = po.rejected && po.rejected.levelId === l.id, now = po.status==='diajukan' && (po.step||0) === i;
       return '<div class="step '+(a?'done':rj?'rej':now?'now':'')+'"><small>'+(fl.length===1?'Disetujui oleh':'Approval '+(i+1))+'</small><b>'+esc(l.title)+'</b><span>'+(a?'Disetujui '+esc(a.name)+' · '+tglShort(a.at):rj?'Ditolak '+esc(po.rejected.name)+' · '+tglShort(po.rejected.at):now?'Menunggu persetujuan':'Belum')+'</span>'+(a&&okSig(a.sig)?'<img src="'+a.sig+'" alt="">':'')+'</div>'; }).join('')+
@@ -431,7 +446,26 @@ function openView(po){
 /* tanda tangan */
 function initPad(cv, src){
   const ctx = cv.getContext('2d'); cv.width = 600; cv.height = 250; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111';
-  pad = {cv, dirty:false, has:!!src, load(im){ctx.clearRect(0,0,600,250);const k=Math.min(600/im.width,250/im.height),w=im.width*k,h=im.height*k;ctx.drawImage(im,(600-w)/2,(250-h)/2,w,h);const d=ctx.getImageData(0,0,600,250),a=d.data;for(let i=0;i<a.length;i+=4)if(a[i]>205&&a[i+1]>205&&a[i+2]>205)a[i+3]=0;ctx.putImageData(d,0,0);this.has=this.dirty=true}, clear(){ ctx.clearRect(0,0,600,250); this.has = false; this.dirty = true; }};
+  pad = {cv, dirty:false, has:!!src, load(im){
+      // Hapus latar: tiap piksel dibandingkan dengan terang latar di sekitarnya, jadi kertas, bayangan,
+      // dan pencahayaan tak rata ikut hilang; hanya goresan tinta yang tersisa, lalu dipotong pas dan dipusatkan.
+      const sc = Math.min(1, 900/Math.max(im.width, im.height)), w = Math.max(1, Math.round(im.width*sc)), h = Math.max(1, Math.round(im.height*sc));
+      const oc = document.createElement('canvas'); oc.width = w; oc.height = h; const ox = oc.getContext('2d', {willReadFrequently:true}); ox.drawImage(im, 0, 0, w, h);
+      const d = ox.getImageData(0, 0, w, h), a = d.data, n = w*h, L = new Float32Array(n), W1 = w+1;
+      for(let i=0;i<n;i++){ const al = a[i*4+3]/255; L[i] = (0.299*a[i*4] + 0.587*a[i*4+1] + 0.114*a[i*4+2])*al + 255*(1-al); }
+      const I = new Float64Array(W1*(h+1));
+      for(let y=0;y<h;y++){ let row = 0; for(let x=0;x<w;x++){ row += L[y*w+x]; I[(y+1)*W1+x+1] = I[y*W1+x+1] + row; } }
+      const r = Math.max(12, Math.round(Math.max(w,h)/7)); let x0 = w, y0 = h, x1 = -1, y1 = -1, cnt = 0;
+      for(let y=0;y<h;y++){ const ya = Math.max(0,y-r), yb = Math.min(h,y+r+1);
+        for(let x=0;x<w;x++){ const xa = Math.max(0,x-r), xb = Math.min(w,x+r+1);
+          const bg = (I[yb*W1+xb] - I[ya*W1+xb] - I[yb*W1+xa] + I[ya*W1+xa]) / ((yb-ya)*(xb-xa));
+          const i = y*w+x; let al = ((bg - L[i])/Math.max(bg,1) - 0.12)/0.2; al = al < 0 ? 0 : al > 1 ? 1 : al;
+          a[i*4] *= 0.55; a[i*4+1] *= 0.55; a[i*4+2] *= 0.55; a[i*4+3] = Math.round(al*255);
+          if(al > 0.6){ cnt++; if(x<x0) x0 = x; if(x>x1) x1 = x; if(y<y0) y0 = y; if(y>y1) y1 = y; } } }
+      if(cnt < 40){ toast('Tanda tangan tidak terdeteksi. Pakai foto tinta gelap di atas kertas terang.'); return; }
+      ox.putImageData(d, 0, 0);
+      const bw = x1-x0+1, bh = y1-y0+1, k = Math.min(576/bw, 226/bh), dw = bw*k, dh = bh*k;
+      ctx.clearRect(0, 0, 600, 250); ctx.drawImage(oc, x0, y0, bw, bh, (600-dw)/2, (250-dh)/2, dw, dh); this.has = this.dirty = true; }, clear(){ ctx.clearRect(0,0,600,250); this.has = false; this.dirty = true; }};
   if(src){ const im = new Image(); im.onload = () => ctx.drawImage(im,0,0,600,250); im.src = src; }
   let on = false; const pt = e => { const r = cv.getBoundingClientRect(); return [(e.clientX-r.left)/r.width*600, (e.clientY-r.top)/r.height*250]; };
   cv.onpointerdown = e => { on = true; cv.setPointerCapture(e.pointerId); const [x,y] = pt(e); ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+.1,y+.1); ctx.stroke(); pad.has = pad.dirty = true; };
@@ -442,7 +476,7 @@ function openProfile(){
   const m = me();
   modal('<h2>Profil saya</h2><div class="sub">Nama dan tanda tangan ini tercetak pada PO saat Anda mengajukan, menyetujui, atau mengetahui.</div>'+
     '<label>Nama (tercetak di PO)</label><input type="text" id="pName" maxlength="60" value="'+esc(m.name)+'" placeholder="mis. Ardiansa">'+
-    '<label style="margin-top:14px">Tanda tangan <span style="font-weight:400">— gambar di kotak atau unggah foto/scan tanda tangan (opsional)</span></label><canvas class="pad" id="pPad"></canvas><input type="file" id="pFile" accept="image/*" hidden>'+
+    '<label style="margin-top:14px">Tanda tangan <span style="font-weight:400">— gambar di kotak, atau unggah foto/scan (latar belakangnya dihapus otomatis)</span></label><canvas class="pad" id="pPad"></canvas><input type="file" id="pFile" accept="image/*" hidden>'+
     '<div class="mfoot" style="justify-content:space-between"><span style="display:flex;gap:8px"><button class="btn sm" data-act="padup">Unggah gambar</button><button class="btn sm" data-act="padclear">Hapus</button></span><span style="display:flex;gap:10px"><button class="btn" data-act="close">Batal</button><button class="btn p" data-act="psave">Simpan</button></span></div>', true);
   initPad($('#pPad'), okSig(m.sig) ? m.sig : '');
 }
@@ -485,7 +519,7 @@ function doSubmit(po){
 /* ---------- PDF (format Po_003 di atas kop surat) ---------- */
 function buildPDF(po){
   const {jsPDF}=window.jspdf,doc=new jsPDF({unit:'mm',format:'a4'}),c=calc(po),fl=poFlow(po);
-  const kn=typeof knOf==='function'?knOf(po):(po.knowers||[]),ks=po.knows||[];
+  const kn=shownKnowers(po),ks=po.knows||[];
   const L=20,R=190,INK=[38,50,56],MUTE=[118,128,132],ACC=[15,138,140],SOFT=[243,246,246],LINE=[218,225,226],WHITE=[255,255,255];
   const bg=()=>doc.addImage(KOP,'JPEG',0,0,210,297,'kop','FAST');
   const font=(st,sz,col)=>{doc.setFont('helvetica',st);doc.setFontSize(sz);doc.setTextColor(col[0],col[1],col[2])};
