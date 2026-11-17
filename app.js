@@ -393,7 +393,7 @@ function openForm(po){
   const had = po && (po.approvals||[]).length;
   modal('<h2>'+(po?'Edit':'Form')+' Pengajuan PO</h2><div class="sub">Diisi oleh Purchasing. Simpan sebagai draft atau langsung ajukan untuk persetujuan.</div>'+
     (had ? '<div class="note warn">PO ini sudah punya persetujuan. Menyimpan perubahan akan mengulang proses persetujuan dari awal.</div>' : '')+
-    '<div class="fg"><div><label>No. PO</label><input type="text" id="fNo" value="'+esc(F.no)+'" readonly></div><div><label>Tanggal</label><input type="date" id="fTgl" value="'+esc(F.tanggal)+'"></div><div><label>Prioritas</label><select id="fPri">'+['Normal','Urgent','Sangat Urgent'].map(p => '<option'+(F.prioritas===p?' selected':'')+'>'+p+'</option>').join('')+'</select></div>'+
+    '<div class="fg"><div><label>No. PO</label><input type="text" id="fNo" maxlength="30" value="'+esc(F.no)+'" title="Terisi otomatis, boleh diubah"></div><div><label>Tanggal</label><input type="date" id="fTgl" value="'+esc(F.tanggal)+'"></div><div><label>Prioritas</label><select id="fPri">'+['Normal','Urgent','Sangat Urgent'].map(p => '<option'+(F.prioritas===p?' selected':'')+'>'+p+'</option>').join('')+'</select></div>'+
     '<div><label>Project</label><input type="text" id="fPro" value="'+esc(F.project)+'" placeholder="Nama project / klien"></div><div><label>Supplier</label><input type="text" id="fSup" value="'+esc(F.supplier)+'" placeholder="Nama supplier"></div><div><label>Vendor <span style="font-weight:400">(opsional)</span></label><input type="text" id="fVen" maxlength="60" list="venList" value="'+esc(F.vendor)+'" placeholder="Nama vendor"><datalist id="venList">'+[...new Set(S.pos.map(p=>String(p.vendor||'').trim()).filter(Boolean))].sort().map(v=>'<option value="'+esc(v)+'">').join('')+'</datalist></div><div><label>Jenis pembelian</label><select id="fJen"><option'+(F.jenis!=='Inventaris'?' selected':'')+'>Material</option><option'+(F.jenis==='Inventaris'?' selected':'')+'>Inventaris</option></select></div><div><label>Bank supplier</label><input type="text" id="fBank" maxlength="30" value="'+esc(F.bank)+'" placeholder="mis. BCA"></div><div><label>No. rekening supplier</label><input type="text" id="fRek" maxlength="40" inputmode="numeric" value="'+esc(F.rek)+'" placeholder="Tercetak di PO"></div><div><label>Atas nama</label><input type="text" id="fAn" maxlength="60" value="'+esc(F.an)+'" placeholder="Nama pemilik rekening"></div></div>'+
     '<div class="tw"><table class="items" style="min-width:760px"><thead><tr><th>Nama material</th><th>Qty</th><th>Satuan</th><th>Harga satuan</th><th>Diskon (Rp)</th><th class="num">Jumlah</th><th>Keterangan</th><th></th></tr></thead><tbody id="fItems">'+F.items.map(itemRow).join('')+'</tbody></table></div>'+
     '<button class="btn sm" data-act="rowadd" style="margin-top:8px">+ Tambah baris</button>'+
@@ -403,7 +403,7 @@ function openForm(po){
 }
 function fillRek(){const s=$('#fSup').value.trim().toLowerCase();if(!s||$('#fRek').value.trim())return;const p=sorted().find(x=>x.rek&&String(x.supplier||'').trim().toLowerCase()===s&&x.id!==F.id);if(p){$('#fBank').value=p.bank||'';$('#fRek').value=p.rek||'';$('#fAn').value=p.an||'';toast('Rekening '+p.supplier+' diisi otomatis dari PO sebelumnya.')}}
 function readForm(){
-  F.tanggal = $('#fTgl').value || today(); F.prioritas = $('#fPri').value; F.jenis = $('#fJen').value; F.bank = $('#fBank').value.trim(); F.rek = $('#fRek').value.trim(); F.an = $('#fAn').value.trim(); F.project = $('#fPro').value.trim(); F.supplier = $('#fSup').value.trim(); F.vendor = $('#fVen').value.trim(); F.catatan = $('#fCat').value.trim(); F.ppnPct = $('#fPpn').checked ? 11 : 0;
+  F.no = $('#fNo').value.trim(); F.tanggal = $('#fTgl').value || today(); F.prioritas = $('#fPri').value; F.jenis = $('#fJen').value; F.bank = $('#fBank').value.trim(); F.rek = $('#fRek').value.trim(); F.an = $('#fAn').value.trim(); F.project = $('#fPro').value.trim(); F.supplier = $('#fSup').value.trim(); F.vendor = $('#fVen').value.trim(); F.catatan = $('#fCat').value.trim(); F.ppnPct = $('#fPpn').checked ? 11 : 0;
   F.items = [...document.querySelectorAll('#fItems tr')].map(tr => { const o = {}; tr.querySelectorAll('[data-f]').forEach(i => o[i.dataset.f] = i.value.trim()); return o; });
 }
 function sums(){
@@ -416,6 +416,8 @@ function submitFields(po){ const f = flowFor(po); return {flow: clone(f.flow), k
 async function saveForm(status, btn){
   readForm();
   const items = F.items.filter(i => i.nama).map(i => ({nama:i.nama, qty:num(i.qty), satuan:i.satuan, harga:num(i.harga), diskon:num(i.diskon), ket:i.ket}));
+  if(!F.no) return toast('No. PO wajib diisi.');
+  if(S.pos.some(p => p.id !== F.id && String(p.no||'').trim().toLowerCase() === F.no.toLowerCase())) return toast('No. PO '+F.no+' sudah dipakai PO lain. Gunakan nomor yang berbeda.');
   if(!F.project || !F.supplier) return toast('Project dan Supplier wajib diisi.');
   if(!items.length) return toast('Isi minimal satu material.');
   if(items.some(i => i.qty <= 0)) return toast('Qty setiap material harus lebih dari 0.');
@@ -645,6 +647,7 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   const t = e.target;
   if(t.id === 'q'){ S.q = t.value; $('#listBody').innerHTML = poTable(filtered(), true, 'Tidak ada PO yang cocok.'); }
+  else if(t.id === 'fNo'){ if(F) F.noEdited = true; }
   else if(t.closest('#fItems') || t.id === 'fPpn') sums();
   else if(t.dataset.jb != null) W.jabatan[+t.dataset.jb].title = t.value;
   else if(t.dataset.rmax != null) W.rules[+t.dataset.rmax].max = t.value === '' ? null : num(t.value);
@@ -655,7 +658,7 @@ document.addEventListener('change', e => {
   else if(t.id === 'fs'){ S.fs = t.value; render(); }
   else if(t.id === 'rm'){ S.rm = t.value; render(); }
   else if(t.id === 'fSup') fillRek();
-  else if(t.id === 'fTgl' && F && !F.id){ $('#fNo').value = F.no = nextNo(t.value || today()); }
+  else if(t.id === 'fTgl' && F && !F.id && !F.noEdited){ $('#fNo').value = F.no = nextNo(t.value || today()); }
   else if(t.dataset.rm != null) W.rules[+t.dataset.rm].modes[t.dataset.j] = t.value;
   else if(t.dataset.jb != null) redrawSet();
   else if(t.dataset.role != null) updUser(t.dataset.role, {role: t.value}).then(ok => ok && toast('Jabatan diperbarui.'));
