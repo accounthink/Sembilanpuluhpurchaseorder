@@ -89,9 +89,19 @@ function shownKnowers(po){
 }
 const canEdit = po => isPurch() && po.status !== 'disetujui';
 const canDelete = po => (isPurch() && po.status !== 'disetujui') || isAdmin();
-const stLabel = po => po.status === 'draft' ? 'Draft' : po.status === 'disetujui' ? 'Disetujui' : po.status === 'ditolak' ? 'Ditolak' : 'Menunggu ' + ((curLevel(po)||{}).title || '');
-const stPill = po => '<span class="st '+esc(po.status)+'">'+esc(stLabel(po))+'</span>';
-const sorted = () => [...S.pos].sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+// Jabatan "Mengetahui" wajib menandai sebelum PO dianggap selesai. PO yang semua penyetujunya sudah
+// menekan Setujui tetapi belum diketahui ditampilkan sebagai "Menunggu diketahui ..." dan belum bisa diunduh.
+const pendingKnow = po => shownKnowers(po).filter(l => !(po.knows||[]).some(k => k.levelId === l.id));
+const done = po => po.status === 'disetujui' && !pendingKnow(po).length;
+const eff = po => (po.status === 'disetujui' && !done(po)) ? 'diajukan' : po.status;
+const stLabel = po => po.status === 'draft' ? 'Draft' : po.status === 'ditolak' ? 'Ditolak' : po.status === 'disetujui' ? (done(po) ? 'Disetujui' : 'Menunggu diketahui ' + pendingKnow(po).map(l => l.title).join(', ')) : 'Menunggu ' + ((curLevel(po)||{}).title || '');
+const stPill = po => '<span class="st '+esc(eff(po))+'">'+esc(stLabel(po))+'</span>';
+// Admin dan Purchasing melihat semua PO. Jabatan lain hanya melihat PO yang melibatkan jabatannya
+// (ia penyetuju/yang mengetahui di alurnya) atau yang pernah ia putuskan.
+const involves = po => { const r = myRole(), u = S.me.id; if(!r || po.status === 'draft') return false;
+  return poFlow(po).some(l => l.id === r) || (po.knowIds||[]).includes(r) || (po.approvals||[]).some(a => a.by === u) || !!(po.rejected && po.rejected.by === u) || (po.knows||[]).some(k => k.by === u); };
+const visible = () => canRekap() ? S.pos : S.pos.filter(involves);
+const sorted = () => [...visible()].sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
 const pendingMine = () => S.pos.filter(p => canApprove(p) || canKnow(p));
 function nextNo(date, skipId){
   const [y,m] = date.split('-'), pre = 'PO-'+y.slice(2)+m+'-'; let mx = 0;
@@ -222,7 +232,7 @@ function rowActs(po){
   if(canKnow(po)) a += '<button class="btn sm p" data-act="know" data-id="'+id+'">Mengetahui</button>';
   if(canEdit(po)) a += '<button class="btn sm" data-act="edit" data-id="'+id+'">Edit</button>';
   if(canDelete(po)) a += '<button class="btn sm d" data-act="del" data-id="'+id+'">Hapus</button>';
-  if(po.status === 'disetujui') a += '<button class="btn sm p" data-act="pdf" data-id="'+id+'">'+IC.dl+'Unduh PO</button>';
+  if(done(po)) a += '<button class="btn sm p" data-act="pdf" data-id="'+id+'">'+IC.dl+'Unduh PO</button>';
   return '<div class="acts">'+a+'</div>';
 }
 function poTable(list, acts, emptyMsg, compact){
@@ -235,28 +245,28 @@ function poTable(list, acts, emptyMsg, compact){
 }
 function vDash(){
   const c = {disetujui:0, diajukan:0, ditolak:0, draft:0}; let val = 0;
-  S.pos.forEach(p => { if(c[p.status] != null) c[p.status]++; if(p.status === 'disetujui') val += calc(p).total; });
-  const tot = S.pos.length || 1, pm = pendingMine().length, pct = k => (c[k]/tot*100)+'%';
+  visible().forEach(p => { const e = eff(p); if(c[e] != null) c[e]++; if(done(p)) val += calc(p).total; });
+  const tot = visible().length || 1, pm = pendingMine().length, pct = k => (c[k]/tot*100)+'%';
   const jt = val >= 1e9 ? [(val/1e9).toLocaleString('id-ID',{maximumFractionDigits:2}),'M'] : val >= 1e6 ? [(val/1e6).toLocaleString('id-ID',{maximumFractionDigits:1}),'jt'] : [fnum(val),''];
   const cta = isPurch() ? ['Jangan lupa','Buat pengajuan PO baru','Buat pengajuan','new'] : pm ? ['Perlu tindakan', pm+' PO menunggu tindakan Anda','Buka persetujuan','goappr'] : ['Semua beres','Tidak ada PO yang menunggu Anda','Lihat semua PO','golist'];
-  return '<div class="grid"><div class="col"><div class="card"><div class="chead"><h2>Pengajuan terbaru</h2><button class="link" data-go="pengajuan">Lihat semua</button></div>'+
+  return '<div class="grid"><div class="col"><div class="card"><div class="chead"><h2>'+(canRekap()?'Pengajuan terbaru':'PO terkait jabatan Anda')+'</h2><button class="link" data-go="pengajuan">Lihat semua</button></div>'+
     poTable(sorted().slice(0,6), false, 'Belum ada pengajuan PO.', true)+'</div></div>'+
   '<div class="col"><div class="card"><div class="chead"><h2>Ringkasan status</h2><button class="link" data-go="pengajuan">Lihat semua</button></div>'+
     '<div class="bar"><span style="width:'+pct('disetujui')+';background:var(--ok)"></span><span style="width:'+pct('diajukan')+';background:var(--wait)"></span><span style="width:'+pct('ditolak')+';background:var(--no)"></span><span style="width:'+pct('draft')+';background:var(--draft)"></span></div>'+
     '<div class="legend"><div><small><i class="dot" style="background:var(--ok)"></i>Disetujui</small><b>'+c.disetujui+'</b></div><div><small><i class="dot" style="background:var(--wait)"></i>Menunggu</small><b>'+c.diajukan+'</b></div><div><small><i class="dot" style="background:var(--no)"></i>Ditolak</small><b>'+c.ditolak+'</b></div><div><small><i class="dot" style="background:var(--draft)"></i>Draft</small><b>'+c.draft+'</b></div></div></div>'+
   '<div class="tiles">'+
-    '<div class="card tile"><div class="ticon t1">'+IC.box+'</div><div><small>Total PO</small><strong>'+S.pos.length+'</strong></div></div>'+
-    '<div class="card tile"><div class="ticon t2">'+IC.coin+'</div><div><small>Nilai disetujui</small><strong><i>Rp </i>'+jt[0]+'<i>'+jt[1]+'</i></strong></div></div>'+
+    '<div class="card tile"><div class="ticon t1">'+IC.box+'</div><div><small>Total PO</small><strong>'+visible().length+'</strong></div></div>'+
+    '<div class="card tile"><div class="ticon t2">'+IC.coin+'</div><div><small>'+(canRekap()?'Nilai disetujui':'Nilai yang disetujui')+'</small><strong><i>Rp </i>'+jt[0]+'<i>'+jt[1]+'</i></strong></div></div>'+
     '<div class="card tile"><div class="ticon t3">'+IC.clock+'</div><div><small>Dalam proses</small><strong>'+c.diajukan+'</strong></div></div>'+
     '<div class="card tile"><div class="ticon t4">'+IC.star+'</div><div><small>Menunggu saya</small><strong>'+pm+'</strong></div></div></div>'+
   '<div class="cta"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i><small>'+cta[0]+'</small><h3>'+esc(cta[1])+'</h3><button class="pill" data-act="'+cta[3]+'">'+cta[2]+'</button></div>'+
   '</div></div>';
 }
-function filtered(){ const q = S.q.trim().toLowerCase(); return sorted().filter(p => (!S.fs || p.status === S.fs) && (!q || [p.no,p.project,p.supplier].join(' ').toLowerCase().includes(q))); }
+function filtered(){ const q = S.q.trim().toLowerCase(); return sorted().filter(p => (!S.fs || eff(p) === S.fs) && (!q || [p.no,p.project,p.supplier].join(' ').toLowerCase().includes(q))); }
 function vList(){
   return '<div class="card"><div class="chead"><div class="filters"><input type="text" id="q" placeholder="Cari no. PO, project, supplier…" value="'+esc(S.q)+'"><select id="fs"><option value="">Semua status</option>'+
     [['draft','Draft'],['diajukan','Menunggu persetujuan'],['disetujui','Disetujui'],['ditolak','Ditolak']].map(o => '<option value="'+o[0]+'"'+(S.fs===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select></div>'+
-    (isPurch() ? '<button class="btn p" data-act="new">+ Buat pengajuan PO</button>' : '')+'</div><div id="listBody">'+poTable(filtered(), true, S.pos.length ? 'Tidak ada PO yang cocok.' : 'Belum ada pengajuan PO.')+'</div></div>';
+    (isPurch() ? '<button class="btn p" data-act="new">+ Buat pengajuan PO</button>' : '')+'</div><div id="listBody">'+poTable(filtered(), true, visible().length ? 'Tidak ada PO yang cocok.' : 'Belum ada pengajuan PO.')+'</div></div>';
 }
 function vAppr(){
   const r = myRole();
@@ -268,7 +278,7 @@ function vAppr(){
 /* ----- rekap pembelian bulanan ----- */
 function rekap(){
   const m=S.rm||today().slice(0,7),g={Material:{rows:[],sub:0,ppn:0},Inventaris:{rows:[],sub:0,ppn:0}};
-  S.pos.filter(p=>p.status==='disetujui'&&String(p.tanggal||'').slice(0,7)===m)
+  S.pos.filter(p=>done(p)&&String(p.tanggal||'').slice(0,7)===m)
     .sort((a,b)=>String(a.tanggal).localeCompare(String(b.tanggal))||String(a.no).localeCompare(String(b.no)))
     .forEach(p=>{const c=calc(p),k=g[p.jenis==='Inventaris'?'Inventaris':'Material'];c.items.forEach(i=>k.rows.push({p,i}));k.sub+=c.subtotal;k.ppn+=c.ppn});
   return {m,g};
@@ -339,7 +349,7 @@ function setHTML(){
     W.jabatan.map((l,i) => '<div class="lv"><span>Tingkat '+(i+1)+'</span><input type="text" data-jb="'+i+'" value="'+esc(l.title)+'" maxlength="40" placeholder="Nama jabatan"><button class="x" data-act="jbdel" data-i="'+i+'" title="Hapus">×</button></div>').join('')+
     '<button class="btn sm" data-act="jbadd">+ Tambah jabatan</button>'+
     '<div class="chead" style="margin-top:26px"><h2>Aturan berdasarkan nominal PO</h2></div>'+
-    '<div class="note">Tiap baris adalah satu rentang nominal. Jabatan <b>Menyetujui</b> harus menekan Setujui secara berurutan sebelum PO bisa diunduh. Jabatan <b>Mengetahui</b> tercetak di PO tetapi tidak menahan proses. Kosongkan "Sampai (Rp)" untuk rentang tanpa batas atas.</div>'+
+    '<div class="note">Tiap baris adalah satu rentang nominal. Jabatan <b>Menyetujui</b> harus menekan Setujui secara berurutan sebelum PO bisa diunduh. Jabatan <b>Mengetahui</b> wajib menekan Mengetahui (kapan saja setelah PO diajukan); tanpa itu PO belum bisa diunduh. Kosongkan "Sampai (Rp)" untuk rentang tanpa batas atas.</div>'+
     '<div class="tw"><table class="mx"><thead><tr><th>Sampai (Rp)</th>'+W.jabatan.map(j => '<th>'+esc(j.title||'—')+'</th>').join('')+'<th></th></tr></thead><tbody>'+
     W.rules.map((r,ri) => '<tr><td><input type="number" min="0" step="any" data-rmax="'+ri+'" value="'+(r.max==null?'':r.max)+'" placeholder="tanpa batas"></td>'+W.jabatan.map(j => '<td>'+modeSel(ri,j)+'</td>').join('')+'<td><button class="x" data-act="rldel" data-i="'+ri+'" title="Hapus rentang">×</button></td></tr>').join('')+
     '</tbody></table></div>'+
@@ -420,6 +430,7 @@ async function saveForm(status, btn){
   if(await setPO(F.id || rid('p'), d)){ closeModal(); toast(status === 'diajukan' ? d.no+' diajukan ke '+d.flow[0].title+'.' : 'Draft '+d.no+' tersimpan.'); } else btn.disabled = false;
 }
 function openView(po){
+  po = withLiveSigs(po);
   const c = calc(po), fl = poFlow(po), kn = shownKnowers(po), ap = po.approvals||[], ks = po.knows||[];
   const steps = '<div class="step '+(po.status==='draft'?'now':'done')+'"><small>Diajukan oleh</small><b>Purchasing</b><span>'+esc(po.createdName||'-')+(po.status==='draft'?' · masih draft':'')+'</span>'+(okSig(po.createdSig)&&po.status!=='draft'?'<img src="'+po.createdSig+'" alt="">':'')+'</div>'+
     fl.map((l,i) => { const a = ap.find(x => x.levelId === l.id), rj = po.rejected && po.rejected.levelId === l.id, now = po.status==='diajukan' && (po.step||0) === i;
@@ -432,7 +443,7 @@ function openView(po){
   if(isPurch() && po.status === 'draft') acts += '<button class="btn p" data-act="submit" data-id="'+id+'">Ajukan persetujuan</button>';
   if(canApprove(po)) acts += '<button class="btn d" data-act="reject" data-id="'+id+'">Tolak</button><button class="btn p" data-act="approve" data-id="'+id+'">Setujui</button>';
   if(canKnow(po)) acts += '<button class="btn p" data-act="know" data-id="'+id+'">Mengetahui</button>';
-  if(po.status === 'disetujui') acts += '<button class="btn p" data-act="pdf" data-id="'+id+'">'+IC.dl+'Unduh PO (PDF)</button>';
+  if(done(po)) acts += '<button class="btn p" data-act="pdf" data-id="'+id+'">'+IC.dl+'Unduh PO (PDF)</button>';
   modal('<div class="chead" style="margin:0"><h2>'+esc(po.no)+'</h2>'+stPill(po)+'</div>'+
     '<div class="kv"><div><small>Tanggal</small><b>'+esc(tgl(po.tanggal))+'</b></div><div><small>Project</small><b>'+esc(po.project)+'</b></div><div><small>Supplier</small><b>'+esc(po.supplier)+'</b></div><div><small>Vendor</small><b>'+esc(po.vendor||'-')+'</b></div><div><small>Prioritas</small><b>'+esc(po.prioritas||'-')+'</b></div><div><small>Jenis</small><b>'+esc(po.jenis==='Inventaris'?'Inventaris':'Material')+'</b></div><div><small>Rekening supplier</small><b>'+esc(po.rek?[po.bank,po.rek].filter(Boolean).join(' ')+(po.an?' · a.n. '+po.an:''):'-')+'</b></div><div><small>Jumlah item</small><b>'+c.items.length+'</b></div></div>'+
     (po.rejected ? '<div class="note warn"><b>Alasan penolakan:</b> '+esc(po.rejected.reason||'-')+'</div>' : '')+
@@ -440,7 +451,7 @@ function openView(po){
     c.items.map((i,n) => '<tr><td>'+(n+1)+'</td><td>'+esc(i.nama)+'</td><td class="num">'+qtyf(i.qty)+'</td><td>'+esc(i.satuan)+'</td><td class="num">'+rp(i.harga)+'</td><td class="num">'+(num(i.diskon)?rp(i.diskon):'-')+'</td><td class="num">'+rp(i.jumlah)+'</td><td>'+esc(i.ket)+'</td></tr>').join('')+'</tbody></table></div>'+
     '<div class="tot"><div style="flex:1;min-width:220px"><label>Catatan</label>'+esc(po.catatan||'-')+'</div><div class="sum"><div><span>Subtotal</span><b>'+rp(c.subtotal)+'</b></div><div><span>PPN'+(num(po.ppnPct)?' '+num(po.ppnPct)+'%':'')+'</span><b>'+(c.ppn?rp(c.ppn):'-')+'</b></div><div class="g"><span>TOTAL</span><span>'+rp(c.total)+'</span></div></div></div>'+
     '<label style="margin-top:18px">Alur persetujuan</label><div class="steps">'+steps+'</div>'+
-    (po.status !== 'disetujui' ? '<div class="sub" style="margin:14px 0 0">PO dapat diunduh setelah semua jabatan yang menyetujui menekan Setujui.</div>' : '')+
+    (!done(po) ? '<div class="sub" style="margin:14px 0 0">PO dapat diunduh setelah semua jabatan yang menyetujui menekan Setujui dan semua jabatan yang mengetahui menekan Mengetahui.</div>' : '')+
     '<div class="mfoot">'+acts+'</div>');
 }
 /* tanda tangan */
@@ -474,7 +485,7 @@ function initPad(cv, src){
 }
 function openProfile(){
   const m = me();
-  modal('<h2>Profil saya</h2><div class="sub">Nama dan tanda tangan ini tercetak pada PO saat Anda mengajukan, menyetujui, atau mengetahui.</div>'+
+  modal('<h2>Profil saya</h2><div class="sub">Nama dan tanda tangan ini tercetak pada PO yang Anda ajukan, setujui, atau ketahui. Mengganti atau menghapus tanda tangan langsung berlaku di semua PO tersebut.</div>'+
     '<label>Nama (tercetak di PO)</label><input type="text" id="pName" maxlength="60" value="'+esc(m.name)+'" placeholder="mis. Ardiansa">'+
     '<label style="margin-top:14px">Tanda tangan <span style="font-weight:400">— gambar di kotak, atau unggah foto/scan (latar belakangnya dihapus otomatis)</span></label><canvas class="pad" id="pPad"></canvas><input type="file" id="pFile" accept="image/*" hidden>'+
     '<div class="mfoot" style="justify-content:space-between"><span style="display:flex;gap:8px"><button class="btn sm" data-act="padup">Unggah gambar</button><button class="btn sm" data-act="padclear">Hapus</button></span><span style="display:flex;gap:10px"><button class="btn" data-act="close">Batal</button><button class="btn p" data-act="psave">Simpan</button></span></div>', true);
@@ -490,9 +501,9 @@ function needName(){ if(me().name) return false; toast('Isi nama Anda di profil 
 function doApprove(po){
   if(needName()) return; const l = curLevel(po), fl = poFlow(po);
   confirmBox('Setujui '+po.no+'?', 'Anda menyetujui sebagai '+l.title+'. Total '+rp(calc(po).total)+' — '+po.supplier+'.', 'Setujui', false, async () => {
-    const step = (po.step||0) + 1, done = step >= fl.length;
-    if(await updPO(po.id, {approvals:[...(po.approvals||[]), stamp(l)], step, status: done ? 'disetujui' : 'diajukan', updatedAt:Date.now()})){
-      closeModal(); toast(done ? po.no+' disetujui penuh — PO siap diunduh.' : po.no+' disetujui, diteruskan ke '+fl[step].title+'.'); }
+    const step = (po.step||0) + 1, fin = step >= fl.length;
+    if(await updPO(po.id, {approvals:[...(po.approvals||[]), stamp(l)], step, status: fin ? 'disetujui' : 'diajukan', updatedAt:Date.now()})){
+      closeModal(); const w = fin ? pendingKnow({...po, status:'disetujui'}) : []; toast(!fin ? po.no+' disetujui, diteruskan ke '+fl[step].title+'.' : w.length ? po.no+' disetujui. Menunggu diketahui '+w.map(l => l.title).join(', ')+'.' : po.no+' disetujui penuh — PO siap diunduh.'); }
   });
 }
 function doKnow(po){
@@ -517,8 +528,17 @@ function doSubmit(po){
 }
 
 /* ---------- PDF (format Po_003 di atas kop surat) ---------- */
+// Tanda tangan di PO selalu mengikuti profil penandatangan saat ini: diunggah -> langsung tampil,
+// dihapus -> kosong. Salinan yang tersimpan di PO hanya dipakai bila akunnya sudah tidak ada.
+const liveSig = (uid, snap) => S.users[uid] ? (okSig(S.users[uid].sig) ? S.users[uid].sig : '') : (okSig(snap) ? snap : '');
+function withLiveSigs(po){
+  return {...po, createdSig: liveSig(po.createdBy, po.createdSig),
+    approvals: (po.approvals||[]).map(a => ({...a, sig: liveSig(a.by, a.sig)})),
+    knows: (po.knows||[]).map(k => ({...k, sig: liveSig(k.by, k.sig)}))};
+}
 function buildPDF(po){
-  const {jsPDF}=window.jspdf,doc=new jsPDF({unit:'mm',format:'a4'}),c=calc(po),fl=poFlow(po);
+  po = withLiveSigs(po);
+  const {jsPDF}=window.jspdf,doc=new jsPDF({unit:'mm',format:'a4',compress:true}),c=calc(po),fl=poFlow(po);
   const kn=shownKnowers(po),ks=po.knows||[];
   const L=20,R=190,INK=[38,50,56],MUTE=[118,128,132],ACC=[15,138,140],SOFT=[243,246,246],LINE=[218,225,226],WHITE=[255,255,255];
   const bg=()=>doc.addImage(KOP,'JPEG',0,0,210,297,'kop','FAST');
@@ -569,7 +589,7 @@ function buildPDF(po){
   const cw=(R-L)/cols.length,sm=cols.length>4;
   cols.forEach((s,i)=>{const cx=L+i*cw+cw/2,hw=Math.min(cw/2-3,22);
     cap(s.t,cx,y,'center');
-    if(okSig(s.s)){const sw=Math.min(36,cw-6),sh=sw*5/12;try{doc.addImage(s.s,'PNG',cx-sw/2,y+2+(17-sh)/2,sw,sh)}catch(e){}}
+    if(okSig(s.s)){const sw=Math.min(36,cw-6),sh=sw*5/12;try{doc.addImage(s.s,'PNG',cx-sw/2,y+2+(17-sh)/2,sw,sh,undefined,'FAST')}catch(e){}}
     else if(s.at){font('italic',6.5,MUTE);doc.text(s.w+' secara digital',cx,y+11,{align:'center'})}
     doc.setDrawColor(INK[0],INK[1],INK[2]);doc.setLineWidth(.3);doc.line(cx-hw,y+21,cx+hw,y+21);
     font('bold',sm?7.5:8.5,INK);doc.text(fit(s.n||'',cw-4),cx,y+25.3,{align:'center'});
@@ -578,7 +598,7 @@ function buildPDF(po){
   return doc;
 }
 function doPDF(po){
-  if(po.status !== 'disetujui') return toast('PO baru bisa diunduh setelah disetujui.');
+  if(!done(po)) return toast('PO baru bisa diunduh setelah disetujui dan diketahui semua jabatan yang wajib.');
   if(!window.jspdf) return toast('Pembuat PDF gagal dimuat. Muat ulang halaman lalu coba lagi.');
   let blob; try { blob = buildPDF(po).output('blob'); } catch(e){ console.error(e); return toast('Gagal membuat PDF.'); }
   saveFile(String(po.no).replace(/[^\w.-]+/g,'_') + '.pdf', blob).catch(e => toast(e && e.code === 'declined' ? 'Unduhan dibatalkan.' : 'Unduhan tidak tersedia di tampilan ini.'));
