@@ -123,7 +123,7 @@ const updUser = (uid,patch) => write(() => fs.collection('users').doc(uid).updat
 const updCfg = patch => write(() => fs.collection('config').doc('app').update(patch), () => Object.assign(S.cfg, patch));
 
 /* ---------- mulai ---------- */
-const VERSION = '17.11-e';
+const VERSION = '17.11-f';
 function init(){
   const bs = document.querySelector('.brand small'); if(bs) bs.textContent = 'Purchase Order · v' + VERSION;
   route();
@@ -349,13 +349,17 @@ function renderUsers(){ const b = $('#usersBox'); if(b && !b.contains(document.a
 function setHTML(){
   const modeSel = (ri, j) => { const cur = (W.rules[ri].modes||{})[j.id] || 'none';
     return '<select data-rm="'+ri+'" data-j="'+esc(j.id)+'">'+[['approve','Menyetujui'],['know','Mengetahui'],['none','—']].map(o => '<option value="'+o[0]+'"'+(cur===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select>'; };
+  // Keterangan rentang tiap baris, supaya jelas nominal mana yang dicakup ("Sampai" = batas atas).
+  const span = ri => { const m = W.rules[ri].max, hi = m == null ? Infinity : num(m);
+    const lows = W.rules.map(r => r.max == null ? Infinity : num(r.max)).filter(v => v < hi), lo = lows.length ? Math.max(...lows) : null;
+    return (lo == null ? 'Rp 0' : 'di atas Rp ' + fnum(lo)) + (hi === Infinity ? ' dan seterusnya' : ' s.d. Rp ' + fnum(hi)); };
   return '<div class="chead"><h2>Jabatan (urutan persetujuan)</h2></div>'+
     W.jabatan.map((l,i) => '<div class="lv"><span>Tingkat '+(i+1)+'</span><input type="text" data-jb="'+i+'" value="'+esc(l.title)+'" maxlength="40" placeholder="Nama jabatan"><button class="x" data-act="jbdel" data-i="'+i+'" title="Hapus">×</button></div>').join('')+
     '<button class="btn sm" data-act="jbadd">+ Tambah jabatan</button>'+
     '<div class="chead" style="margin-top:26px"><h2>Aturan berdasarkan nominal PO</h2></div>'+
-    '<div class="note">Tiap baris adalah satu rentang nominal. Jabatan <b>Menyetujui</b> harus menekan Setujui secara berurutan sebelum PO bisa diunduh. Jabatan <b>Mengetahui</b> wajib menekan Mengetahui (kapan saja setelah PO diajukan); tanpa itu PO belum bisa diunduh. Kosongkan "Sampai (Rp)" untuk rentang tanpa batas atas.</div>'+
+    '<div class="note">Tiap baris adalah satu rentang nominal. Jabatan <b>Menyetujui</b> harus menekan Setujui secara berurutan sebelum PO bisa diunduh. Jabatan <b>Mengetahui</b> wajib menekan Mengetahui (kapan saja setelah PO diajukan); tanpa itu PO belum bisa diunduh. "Sampai (Rp)" adalah batas atas rentang; rentangnya mulai dari atas batas baris sebelumnya (lihat keterangan di bawah tiap angka). Kosongkan untuk rentang tanpa batas atas.</div>'+
     '<div class="tw"><table class="mx"><thead><tr><th>Sampai (Rp)</th>'+W.jabatan.map(j => '<th>'+esc(j.title||'—')+'</th>').join('')+'<th></th></tr></thead><tbody>'+
-    W.rules.map((r,ri) => '<tr><td><input type="number" min="0" step="any" data-rmax="'+ri+'" value="'+(r.max==null?'':r.max)+'" placeholder="tanpa batas"></td>'+W.jabatan.map(j => '<td>'+modeSel(ri,j)+'</td>').join('')+'<td><button class="x" data-act="rldel" data-i="'+ri+'" title="Hapus rentang">×</button></td></tr>').join('')+
+    W.rules.map((r,ri) => '<tr><td><input type="number" min="0" step="any" data-rmax="'+ri+'" value="'+(r.max==null?'':r.max)+'" placeholder="tanpa batas"><div style="font-size:11px;color:var(--ink2);margin-top:3px;white-space:nowrap">'+span(ri)+'</div></td>'+W.jabatan.map(j => '<td style="vertical-align:top">'+modeSel(ri,j)+'</td>').join('')+'<td><button class="x" data-act="rldel" data-i="'+ri+'" title="Hapus rentang">×</button></td></tr>').join('')+
     '</tbody></table></div>'+
     '<div class="mfoot" style="justify-content:space-between"><button class="btn sm" data-act="rladd">+ Tambah rentang</button><button class="btn p" data-act="setsave">Simpan pengaturan</button></div>';
 }
@@ -664,7 +668,7 @@ document.addEventListener('change', e => {
   else if(t.id === 'fSup') fillRek();
   else if(t.id === 'fTgl' && F && !F.id && !F.noEdited){ $('#fNo').value = F.no = nextNo(t.value || today()); }
   else if(t.dataset.rm != null) W.rules[+t.dataset.rm].modes[t.dataset.j] = t.value;
-  else if(t.dataset.jb != null) redrawSet();
+  else if(t.dataset.jb != null || t.dataset.rmax != null) redrawSet();
   else if(t.dataset.role != null) updUser(t.dataset.role, {role: t.value}).then(ok => ok && toast('Jabatan diperbarui.'));
 });
 init();
