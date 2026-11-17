@@ -122,7 +122,9 @@ const updUser = (uid,patch) => write(() => fs.collection('users').doc(uid).updat
 const updCfg = patch => write(() => fs.collection('config').doc('app').update(patch), () => Object.assign(S.cfg, patch));
 
 /* ---------- mulai ---------- */
+const VERSION = '17.11-d';
 function init(){
+  const bs = document.querySelector('.brand small'); if(bs) bs.textContent = 'Purchase Order · v' + VERSION;
   route();
   const c = window.FIREBASE_CONFIG || {}, ready = c.apiKey && !/^ISI/.test(c.apiKey);
   if(window.DEMO || /[?&]demo\b/.test(location.search)){
