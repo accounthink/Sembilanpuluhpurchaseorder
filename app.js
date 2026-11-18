@@ -54,12 +54,23 @@ function toast(t){ const b = $('#toastBox'); b.innerHTML = '<div class="toast">'
 /* ---------- jabatan & aturan nominal ---------- */
 const jab = () => (Array.isArray(S.cfg.jabatan) && S.cfg.jabatan.length) ? S.cfg.jabatan : DEF_JAB;
 const rules = () => (Array.isArray(S.cfg.rules) && S.cfg.rules.length) ? S.cfg.rules : DEF_RULES;
-function ruleFor(total){
-  const rs = [...rules()].sort((a,b) => (a.max==null?Infinity:a.max) - (b.max==null?Infinity:b.max));
+// Aturan khusus pembelian Inventaris. Bawaan: di bawah Rp 25 juta cukup disetujui Accounting;
+// Rp 25 juta s.d. di bawah Rp 100 juta disetujui General Manager, diketahui Accounting;
+// Rp 100 juta ke atas disetujui Direktur, diketahui General Manager dan Accounting.
+function defRulesInv(){
+  const J = jab(), find = (re, id) => (J.find(j => re.test(j.title)) || J.find(j => j.id === id) || {}).id;
+  const acc = find(/account/i, 'acc'), gm = find(/general/i, 'gm'), dir = find(/direktur|director/i, 'dir');
+  if(!acc || !gm || !dir) return rules();
+  const m = x => { const o = {}; J.forEach(j => o[j.id] = x[j.id] || 'none'); return o; };
+  return [{max:24999999, modes:m({[acc]:'approve'})}, {max:99999999, modes:m({[acc]:'know', [gm]:'approve'})}, {max:null, modes:m({[acc]:'know', [gm]:'know', [dir]:'approve'})}];
+}
+const rulesInv = () => (Array.isArray(S.cfg.rulesInv) && S.cfg.rulesInv.length) ? S.cfg.rulesInv : defRulesInv();
+function ruleFor(total, set){
+  const rs = [...(set || rules())].sort((a,b) => (a.max==null?Infinity:a.max) - (b.max==null?Infinity:b.max));
   return rs.find(r => r.max==null || total <= r.max) || rs[rs.length-1];
 }
 function flowFor(po){
-  const r = ruleFor(calc(po).total), m = r.modes || {};
+  const r = ruleFor(calc(po).total, po.jenis === 'Inventaris' ? rulesInv() : rules()), m = r.modes || {};
   let flow = jab().filter(j => m[j.id] === 'approve');
   if(!flow.length) flow = jab();
   return {flow, knowers: jab().filter(j => m[j.id] === 'know' && !flow.includes(j))};
@@ -123,7 +134,7 @@ const updUser = (uid,patch) => write(() => fs.collection('users').doc(uid).updat
 const updCfg = patch => write(() => fs.collection('config').doc('app').update(patch), () => Object.assign(S.cfg, patch));
 
 /* ---------- mulai ---------- */
-const VERSION = '18.11-d';
+const VERSION = '18.11-f';
 function init(){
   const bs = document.querySelector('.brand small'); if(bs) bs.textContent = 'Purchase Order · v' + VERSION;
   route();
@@ -420,38 +431,45 @@ function usersHTML(){
 }
 function renderUsers(){ const b = $('#usersBox'); if(b && !b.contains(document.activeElement)) b.innerHTML = usersHTML(); }
 function setHTML(){
-  const modeSel = (ri, j) => { const cur = (W.rules[ri].modes||{})[j.id] || 'none';
-    return '<select data-rm="'+ri+'" data-j="'+esc(j.id)+'">'+[['approve','Menyetujui'],['know','Mengetahui'],['none','—']].map(o => '<option value="'+o[0]+'"'+(cur===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select>'; };
-  // Keterangan rentang tiap baris, supaya jelas nominal mana yang dicakup ("Sampai" = batas atas).
-  const span = ri => { const m = W.rules[ri].max, hi = m == null ? Infinity : num(m);
-    const lows = W.rules.map(r => r.max == null ? Infinity : num(r.max)).filter(v => v < hi), lo = lows.length ? Math.max(...lows) : null;
-    return (lo == null ? 'Rp 0' : 'di atas Rp ' + fnum(lo)) + (hi === Infinity ? ' dan seterusnya' : ' s.d. Rp ' + fnum(hi)); };
+  // Satu tabel aturan nominal; key = 'rules' (Material) atau 'rulesInv' (Inventaris).
+  const table = (key, title, note) => { const R = W[key];
+    const modeSel = (ri, j) => { const cur = (R[ri].modes||{})[j.id] || 'none';
+      return '<select data-k="'+key+'" data-rm="'+ri+'" data-j="'+esc(j.id)+'">'+[['approve','Menyetujui'],['know','Mengetahui'],['none','—']].map(o => '<option value="'+o[0]+'"'+(cur===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select>'; };
+    // Keterangan rentang tiap baris, supaya jelas nominal mana yang dicakup ("Sampai" = batas atas).
+    const span = ri => { const m = R[ri].max, hi = m == null ? Infinity : num(m);
+      const lows = R.map(r => r.max == null ? Infinity : num(r.max)).filter(v => v < hi), lo = lows.length ? Math.max(...lows) : null;
+      return (lo == null ? 'Rp 0' : 'di atas Rp ' + fnum(lo)) + (hi === Infinity ? ' dan seterusnya' : ' s.d. Rp ' + fnum(hi)); };
+    return '<div class="chead" style="margin-top:26px"><h2>'+title+'</h2></div>'+(note ? '<div class="note">'+note+'</div>' : '')+
+      '<div class="tw"><table class="mx"><thead><tr><th>Sampai (Rp)</th>'+W.jabatan.map(j => '<th>'+esc(j.title||'—')+'</th>').join('')+'<th></th></tr></thead><tbody>'+
+      R.map((r,ri) => '<tr><td><input type="number" min="0" step="any" data-k="'+key+'" data-rmax="'+ri+'" value="'+(r.max==null?'':r.max)+'" placeholder="tanpa batas"><div style="font-size:11px;color:var(--ink2);margin-top:3px;white-space:nowrap">'+span(ri)+'</div></td>'+W.jabatan.map(j => '<td style="vertical-align:top">'+modeSel(ri,j)+'</td>').join('')+'<td><button class="x" data-act="rldel" data-k="'+key+'" data-i="'+ri+'" title="Hapus rentang">×</button></td></tr>').join('')+
+      '</tbody></table></div><button class="btn sm" data-act="rladd" data-k="'+key+'" style="margin-top:8px">+ Tambah rentang</button>'; };
   return '<div class="chead"><h2>Jabatan (urutan persetujuan)</h2></div>'+
     W.jabatan.map((l,i) => '<div class="lv"><span>Tingkat '+(i+1)+'</span><input type="text" data-jb="'+i+'" value="'+esc(l.title)+'" maxlength="40" placeholder="Nama jabatan"><button class="x" data-act="jbdel" data-i="'+i+'" title="Hapus">×</button></div>').join('')+
     '<button class="btn sm" data-act="jbadd">+ Tambah jabatan</button>'+
-    '<div class="chead" style="margin-top:26px"><h2>Aturan berdasarkan nominal PO</h2></div>'+
-    '<div class="note">Tiap baris adalah satu rentang nominal. Jabatan <b>Menyetujui</b> harus menekan Setujui secara berurutan sebelum PO bisa diunduh. Jabatan <b>Mengetahui</b> wajib menekan Mengetahui (kapan saja setelah PO diajukan); tanpa itu PO belum bisa diunduh. "Sampai (Rp)" adalah batas atas rentang; rentangnya mulai dari atas batas baris sebelumnya (lihat keterangan di bawah tiap angka). Kosongkan untuk rentang tanpa batas atas.</div>'+
-    '<div class="tw"><table class="mx"><thead><tr><th>Sampai (Rp)</th>'+W.jabatan.map(j => '<th>'+esc(j.title||'—')+'</th>').join('')+'<th></th></tr></thead><tbody>'+
-    W.rules.map((r,ri) => '<tr><td><input type="number" min="0" step="any" data-rmax="'+ri+'" value="'+(r.max==null?'':r.max)+'" placeholder="tanpa batas"><div style="font-size:11px;color:var(--ink2);margin-top:3px;white-space:nowrap">'+span(ri)+'</div></td>'+W.jabatan.map(j => '<td style="vertical-align:top">'+modeSel(ri,j)+'</td>').join('')+'<td><button class="x" data-act="rldel" data-i="'+ri+'" title="Hapus rentang">×</button></td></tr>').join('')+
-    '</tbody></table></div>'+
-    '<div class="mfoot" style="justify-content:space-between"><button class="btn sm" data-act="rladd">+ Tambah rentang</button><button class="btn p" data-act="setsave">Simpan pengaturan</button></div>';
+    '<div class="note" style="margin-top:26px">Tiap baris adalah satu rentang nominal. Jabatan <b>Menyetujui</b> harus menekan Setujui secara berurutan sebelum PO bisa diunduh. Jabatan <b>Mengetahui</b> wajib menekan Mengetahui (kapan saja setelah PO diajukan); tanpa itu PO belum bisa diunduh. "Sampai (Rp)" adalah batas atas rentang; rentangnya mulai dari atas batas baris sebelumnya (lihat keterangan di bawah tiap angka). Kosongkan untuk rentang tanpa batas atas.</div>'+
+    table('rules', 'Aturan nominal — pembelian Material', '')+
+    table('rulesInv', 'Aturan nominal — pembelian Inventaris', 'Berlaku untuk PO dengan Jenis pembelian <b>Inventaris</b>. Untuk batas "X ke atas", baris sebelumnya diisi X dikurangi 1 (mis. 24999999 untuk "25 juta ke atas", 99999999 untuk "100 juta ke atas").')+
+    '<div class="mfoot" style="justify-content:flex-end;margin-top:22px"><button class="btn p" data-act="setsave">Simpan pengaturan</button></div>';
 }
 function vSet(){
   if(!isAdmin()) return '<div class="card empty">Jabatan dan aturan persetujuan hanya dapat diubah oleh admin.<br><br><button class="btn" data-act="profile">Ubah profil & tanda tangan saya</button></div>';
-  if(!W) W = {jabatan: clone(jab()), rules: clone(rules())};
+  if(!W) W = {jabatan: clone(jab()), rules: clone(rules()), rulesInv: clone(rulesInv())};
   return '<div class="col"><div class="card" id="setBox">'+setHTML()+'</div>'+
     '<div class="card"><div class="chead"><h2>Jabatan pengguna</h2></div><div class="note">Pengguna muncul di sini setelah mendaftar akun. Pilih jabatannya; perubahan langsung tersimpan.</div><div id="usersBox">'+usersHTML()+'</div></div></div>';
 }
 async function saveSettings(btn){
   if(W.jabatan.some(j => !j.title.trim())) return toast('Nama jabatan tidak boleh kosong.');
-  const ids = W.jabatan.map(j => j.id);
-  const rs = W.rules.map(r => { const m = {}; ids.forEach(id => m[id] = (r.modes||{})[id] || 'none'); return {max: r.max==null||r.max==='' ? null : num(r.max), modes: m}; })
-    .sort((a,b) => (a.max==null?Infinity:a.max) - (b.max==null?Infinity:b.max));
-  if(rs.some(r => !Object.values(r.modes).includes('approve'))) return toast('Setiap rentang perlu minimal satu jabatan yang Menyetujui.');
-  if(rs.filter(r => r.max == null).length !== 1) return toast('Harus ada tepat satu rentang "tanpa batas" untuk nominal terbesar.');
-  if(new Set(rs.map(r => r.max)).size !== rs.length) return toast('Ada dua rentang dengan batas yang sama.');
+  const ids = W.jabatan.map(j => j.id), out = {};
+  for(const [key, label] of [['rules','Material'], ['rulesInv','Inventaris']]){
+    const rs = W[key].map(r => { const m = {}; ids.forEach(id => m[id] = (r.modes||{})[id] || 'none'); return {max: r.max==null||r.max==='' ? null : num(r.max), modes: m}; })
+      .sort((a,b) => (a.max==null?Infinity:a.max) - (b.max==null?Infinity:b.max));
+    if(rs.some(r => !Object.values(r.modes).includes('approve'))) return toast('Aturan '+label+': setiap rentang perlu minimal satu jabatan yang Menyetujui.');
+    if(rs.filter(r => r.max == null).length !== 1) return toast('Aturan '+label+': harus ada tepat satu rentang "tanpa batas" untuk nominal terbesar.');
+    if(new Set(rs.map(r => r.max)).size !== rs.length) return toast('Aturan '+label+': ada dua rentang dengan batas yang sama.');
+    out[key] = rs;
+  }
   btn.disabled = true;
-  const ok = await updCfg({jabatan: W.jabatan.map(j => ({id:j.id, title:j.title.trim()})), rules: rs});
+  const ok = await updCfg({jabatan: W.jabatan.map(j => ({id:j.id, title:j.title.trim()})), rules: out.rules, rulesInv: out.rulesInv});
   btn.disabled = false;
   if(ok){ W = null; toast('Pengaturan tersimpan. Berlaku untuk PO yang diajukan mulai sekarang.'); render(); }
 }
@@ -720,10 +738,10 @@ document.addEventListener('click', e => {
   else if(a === 'padup') $('#pFile').click();
   else if(a === 'csv') doCSV(b);
   else if(a === 'psave') saveProfile(b);
-  else if(a === 'jbadd'){ if(W.jabatan.length >= 6) return toast('Maksimal 6 jabatan.'); const id = rid('j'); W.jabatan.push({id, title:''}); W.rules.forEach(r => r.modes[id] = 'none'); redrawSet(); }
-  else if(a === 'jbdel'){ if(W.jabatan.length <= 1) return toast('Minimal satu jabatan.'); const j = W.jabatan.splice(+b.dataset.i, 1)[0]; W.rules.forEach(r => delete r.modes[j.id]); redrawSet(); }
-  else if(a === 'rladd'){ const m = {}; W.jabatan.forEach(j => m[j.id] = 'none'); W.rules.splice(Math.max(W.rules.length-1,0), 0, {max:0, modes:m}); redrawSet(); }
-  else if(a === 'rldel'){ if(W.rules.length <= 1) return toast('Minimal satu rentang.'); W.rules.splice(+b.dataset.i, 1); redrawSet(); }
+  else if(a === 'jbadd'){ if(W.jabatan.length >= 6) return toast('Maksimal 6 jabatan.'); const id = rid('j'); W.jabatan.push({id, title:''}); W.rules.concat(W.rulesInv).forEach(r => r.modes[id] = 'none'); redrawSet(); }
+  else if(a === 'jbdel'){ if(W.jabatan.length <= 1) return toast('Minimal satu jabatan.'); const j = W.jabatan.splice(+b.dataset.i, 1)[0]; W.rules.concat(W.rulesInv).forEach(r => delete r.modes[j.id]); redrawSet(); }
+  else if(a === 'rladd'){ const R = W[b.dataset.k], m = {}; W.jabatan.forEach(j => m[j.id] = 'none'); R.splice(Math.max(R.length-1,0), 0, {max:0, modes:m}); redrawSet(); }
+  else if(a === 'rldel'){ const R = W[b.dataset.k]; if(R.length <= 1) return toast('Minimal satu rentang.'); R.splice(+b.dataset.i, 1); redrawSet(); }
   else if(a === 'setsave') saveSettings(b);
   else if(a === 'mkadmin'){ const uid = b.dataset.uid, u = S.users[uid] || {}; confirmBox('Pindahkan admin ke '+(u.name||u.email||'pengguna ini')+'?', 'Admin hanya satu. Setelah dipindahkan, Anda tidak lagi bisa membuka Pengaturan; hanya admin baru yang bisa mengembalikannya.', 'Pindahkan admin', true, async () => { if(await updCfg({adminUid: uid})){ W = null; closeModal(); toast('Admin dipindahkan.'); render(); } }); }
 });
@@ -731,19 +749,20 @@ document.addEventListener('input', e => {
   const t = e.target;
   if(t.id === 'q'){ S.q = t.value; $('#listBody').innerHTML = poTable(filtered(), true, 'Tidak ada PO yang cocok.'); }
   else if(t.id === 'fNo'){ if(F) F.noEdited = true; }
-  else if(t.closest('#fItems') || t.id === 'fPpn' || t.id === 'fOng') sums();
+  else if(t.closest('#fItems') || t.id === 'fPpn' || t.id === 'fOng' || t.id === 'fJen') sums();
   else if(t.dataset.jb != null) W.jabatan[+t.dataset.jb].title = t.value;
-  else if(t.dataset.rmax != null) W.rules[+t.dataset.rmax].max = t.value === '' ? null : num(t.value);
+  else if(t.dataset.rmax != null) W[t.dataset.k][+t.dataset.rmax].max = t.value === '' ? null : num(t.value);
 });
 document.addEventListener('change', e => {
   const t = e.target;
   if(t.id === 'pFile'){ const f = t.files[0]; if(!f || !pad) return; const im = new Image(); im.onload = () => { pad.load(im); URL.revokeObjectURL(im.src); }; im.onerror = () => toast('Gambar tidak bisa dibaca. Pakai PNG atau JPG.'); im.src = URL.createObjectURL(f); t.value = ''; }
   else if(t.id === 'fs'){ S.fs = t.value; render(); }
+  else if(t.id === 'fJen' && F) sums();
   else if(t.id === 'rm'){ S.rm = t.value; render(); }
   else if(t.id === 'rk'){ S.rk = t.value; render(); }
   else if(t.id === 'fSup') fillRek();
   else if(t.id === 'fTgl' && F && !F.id && !F.noEdited){ $('#fNo').value = F.no = nextNo(t.value || today()); }
-  else if(t.dataset.rm != null) W.rules[+t.dataset.rm].modes[t.dataset.j] = t.value;
+  else if(t.dataset.rm != null) W[t.dataset.k][+t.dataset.rm].modes[t.dataset.j] = t.value;
   else if(t.dataset.jb != null || t.dataset.rmax != null) redrawSet();
   else if(t.dataset.role != null) updUser(t.dataset.role, {role: t.value}).then(ok => ok && toast('Jabatan diperbarui.'));
 });
