@@ -123,7 +123,7 @@ const updUser = (uid,patch) => write(() => fs.collection('users').doc(uid).updat
 const updCfg = patch => write(() => fs.collection('config').doc('app').update(patch), () => Object.assign(S.cfg, patch));
 
 /* ---------- mulai ---------- */
-const VERSION = '18.11-a';
+const VERSION = '18.11-b';
 function init(){
   const bs = document.querySelector('.brand small'); if(bs) bs.textContent = 'Purchase Order · v' + VERSION;
   route();
@@ -282,74 +282,73 @@ function vAppr(){
 // Nama klien = kolom Project. Dikelompokkan tanpa membedakan huruf besar-kecil dan spasi berlebih.
 const clientKey=p=>String(p.project||'').trim().replace(/\s+/g,' ').toLowerCase()||'(tanpa nama)';
 function rekap(){
-  const m=S.rm||today().slice(0,7),month=S.pos.filter(p=>done(p)&&String(p.tanggal||'').slice(0,7)===m);
-  // Ringkasan semua klien di bulan ini (selalu lengkap, tidak ikut filter).
+  const m=S.rm||today().slice(0,7),month=S.pos.filter(p=>done(p)&&String(p.tanggal||'').slice(0,7)===m)
+    .sort((a,b)=>String(a.tanggal).localeCompare(String(b.tanggal))||String(a.no).localeCompare(String(b.no)));
+  // Satu kelompok per klien, berisi semua barang yang dibeli untuk klien itu di bulan ini.
   const cmap={};
-  month.forEach(p=>{const k=clientKey(p),c=calc(p),j=p.jenis==='Inventaris'?'inv':'mat';
-    const x=cmap[k]||(cmap[k]={key:k,name:String(p.project||'').trim()||'(tanpa nama)',po:0,item:0,mat:0,inv:0});
-    x.po++;x.item+=c.items.length;x[j]+=c.total});
-  const clients=Object.values(cmap).sort((a,b)=>(b.mat+b.inv)-(a.mat+a.inv)||a.name.localeCompare(b.name));
-  const ck=clients.some(c=>c.key===S.rk)?S.rk:'',cname=ck?cmap[ck].name:'';
-  const g={Material:{rows:[],sub:0,ppn:0,ong:0},Inventaris:{rows:[],sub:0,ppn:0,ong:0}};
-  month.filter(p=>!ck||clientKey(p)===ck)
-    .sort((a,b)=>clientKey(a).localeCompare(clientKey(b))||String(a.tanggal).localeCompare(String(b.tanggal))||String(a.no).localeCompare(String(b.no)))
-    .forEach(p=>{const c=calc(p),k=g[p.jenis==='Inventaris'?'Inventaris':'Material'];c.items.forEach(i=>k.rows.push({p,i}));k.sub+=c.subtotal;k.ppn+=c.ppn;k.ong+=c.ongkir});
-  return {m,g,clients,ck,cname,cmap};
+  month.forEach(p=>{const k=clientKey(p),c=calc(p),inv=p.jenis==='Inventaris';
+    const x=cmap[k]||(cmap[k]={key:k,name:String(p.project||'').trim().replace(/\s+/g,' ')||'(tanpa nama)',po:0,rows:[],sub:0,ppn:0,ong:0,mat:0,inv:0});
+    x.po++;c.items.forEach(i=>x.rows.push({p,i,jenis:inv?'Inventaris':'Material'}));
+    x.sub+=c.subtotal;x.ppn+=c.ppn;x.ong+=c.ongkir;x[inv?'inv':'mat']+=c.total});
+  const clients=Object.values(cmap).map(c=>Object.assign(c,{item:c.rows.length,total:c.mat+c.inv})).sort((a,b)=>b.total-a.total||a.name.localeCompare(b.name));
+  const ck=clients.some(c=>c.key===S.rk)?S.rk:'',cname=ck?cmap[ck].name:'',shown=ck?[cmap[ck]]:clients;
+  const T={mat:0,inv:0};shown.forEach(c=>{T.mat+=c.mat;T.inv+=c.inv});
+  return {m,clients,shown,ck,cname,T};
 }
 const blnLabel=m=>BULAN[+m.slice(5,7)-1]+' '+m.slice(0,4);
 function vRekap(){
-  const {m,g,clients,ck,cname,cmap}=rekap(),tot=k=>g[k].sub+g[k].ppn+g[k].ong;
+  const {m,clients,shown,ck,cname,T}=rekap();
   const months=[...new Set(S.pos.map(p=>String(p.tanggal||'').slice(0,7)).filter(x=>/^\d{4}-\d{2}$/.test(x)).concat(today().slice(0,7),m))].sort().reverse();
   const tile=(c,ic,l,v)=>'<div class="card tile"><div class="ticon '+c+'">'+ic+'</div><div><small>'+l+'</small><strong style="font-size:20px">'+rp(v)+'</strong></div></div>';
   const sub=t=>'<br><span style="font-size:11.5px;color:var(--ink2)">'+t+'</span>';
-  const sec=k=>{let last=null;
-    return '<div class="card"><div class="chead"><h2>'+k+' · '+g[k].rows.length+' item</h2><b style="font-weight:600">'+rp(tot(k))+'</b></div>'+(g[k].rows.length?
-    '<div class="tw"><table><thead><tr><th>Tgl</th><th>No. PO</th><th>Barang</th><th class="num">Qty</th><th class="num">Jumlah</th></tr></thead><tbody>'+
-    g[k].rows.map(r=>{const key=clientKey(r.p),head=!ck&&key!==last?'<tr><td colspan="5" style="background:rgba(15,138,140,.08);font-weight:600;color:var(--teal-d);padding:9px 10px">'+esc(cmap[key].name)+'</td></tr>':'';last=key;
-      return head+'<tr><td style="white-space:nowrap">'+esc(String(r.p.tanggal||'').slice(8,10)+'/'+String(r.p.tanggal||'').slice(5,7))+'</td><td><button class="pono" data-act="view" data-id="'+esc(r.p.id)+'">'+esc(r.p.no)+'</button></td><td>'+esc(r.i.nama)+sub(esc(r.p.supplier))+'</td><td class="num">'+qtyf(r.i.qty)+' '+esc(r.i.satuan)+'</td><td class="num">'+rp(r.i.jumlah)+'</td></tr>'}).join('')+
-    (g[k].ppn?'<tr><td colspan="4" class="num">PPN</td><td class="num">'+rp(g[k].ppn)+'</td></tr>':'')+
-    (g[k].ong?'<tr><td colspan="4" class="num">Ongkos kirim</td><td class="num">'+rp(g[k].ong)+'</td></tr>':'')+
-    '<tr><td colspan="4" class="num"><b>Total '+k+'</b></td><td class="num"><b>'+rp(tot(k))+'</b></td></tr></tbody></table></div>'
-    :'<div class="empty">Belum ada pembelian '+k.toLowerCase()+(ck?' untuk klien '+esc(cname):'')+' yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>'};
-  const per='<div class="card"><div class="chead"><h2>Ringkasan per klien · '+esc(blnLabel(m))+'</h2>'+(ck?'<button class="link" data-act="rkall">Tampilkan semua klien</button>':'')+'</div>'+(clients.length?
+  const pill=j=>'<span class="st '+(j==='Inventaris'?'diajukan':'disetujui')+'" style="font-size:11px;padding:3px 9px">'+j+'</span>';
+  const card=c=>'<div class="card"><div class="chead" style="align-items:flex-start"><div><h2 style="font-size:17px;font-weight:600">'+esc(c.name)+'</h2>'+
+    '<div style="font-size:12px;color:var(--ink2);margin-top:3px">'+c.po+' PO · '+c.item+' barang'+(c.mat?' · Material '+rp(c.mat):'')+(c.inv?' · Inventaris '+rp(c.inv):'')+'</div></div>'+
+    '<b style="font-weight:600;font-size:16px">'+rp(c.total)+'</b></div>'+
+    '<div class="tw"><table><thead><tr><th>Tgl</th><th>No. PO</th><th>Barang</th><th>Jenis</th><th class="num">Qty</th><th class="num">Harga</th><th class="num">Jumlah</th></tr></thead><tbody>'+
+    c.rows.map(r=>'<tr><td style="white-space:nowrap">'+esc(String(r.p.tanggal||'').slice(8,10)+'/'+String(r.p.tanggal||'').slice(5,7))+'</td><td><button class="pono" data-act="view" data-id="'+esc(r.p.id)+'">'+esc(r.p.no)+'</button></td><td>'+esc(r.i.nama)+sub(esc(r.p.supplier))+'</td><td>'+pill(r.jenis)+'</td><td class="num">'+qtyf(r.i.qty)+' '+esc(r.i.satuan)+'</td><td class="num">'+rp(r.i.harga)+'</td><td class="num">'+rp(r.i.jumlah)+'</td></tr>').join('')+
+    (c.ppn?'<tr><td colspan="6" class="num">PPN</td><td class="num">'+rp(c.ppn)+'</td></tr>':'')+
+    (c.ong?'<tr><td colspan="6" class="num">Ongkos kirim</td><td class="num">'+rp(c.ong)+'</td></tr>':'')+
+    '<tr><td colspan="6" class="num"><b>Total '+esc(c.name)+'</b></td><td class="num"><b>'+rp(c.total)+'</b></td></tr></tbody></table></div></div>';
+  const per=!ck&&clients.length>1?'<div class="card"><div class="chead"><h2>Ringkasan per klien · '+esc(blnLabel(m))+'</h2></div>'+
     '<div class="tw"><table><thead><tr><th>Klien / project</th><th class="num">PO</th><th class="num">Material</th><th class="num">Inventaris</th><th class="num">Total</th></tr></thead><tbody>'+
-    clients.map(c=>'<tr'+(c.key===ck?' style="background:rgba(15,138,140,.1)"':'')+'><td><button class="pono" data-act="rkc" data-k="'+esc(c.key)+'">'+esc(c.name)+'</button>'+sub(c.item+' item')+'</td><td class="num">'+c.po+'</td><td class="num">'+(c.mat?rp(c.mat):'-')+'</td><td class="num">'+(c.inv?rp(c.inv):'-')+'</td><td class="num"><b>'+rp(c.mat+c.inv)+'</b></td></tr>').join('')+
-    '</tbody></table></div><div style="font-size:12px;color:var(--ink2);margin-top:10px">Klik nama klien untuk melihat rinciannya saja. Total per klien sudah termasuk PPN dan ongkos kirim.</div>'
-    :'<div class="empty">Belum ada pembelian yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>';
+    clients.map(c=>'<tr><td><button class="pono" data-act="rkc" data-k="'+esc(c.key)+'">'+esc(c.name)+'</button>'+sub(c.item+' barang')+'</td><td class="num">'+c.po+'</td><td class="num">'+(c.mat?rp(c.mat):'-')+'</td><td class="num">'+(c.inv?rp(c.inv):'-')+'</td><td class="num"><b>'+rp(c.total)+'</b></td></tr>').join('')+
+    '</tbody></table></div><div style="font-size:12px;color:var(--ink2);margin-top:10px">Klik nama klien untuk melihat rincian klien itu saja. Rincian barang tiap klien ada di bawah.</div></div>':'';
   return '<div class="col"><div class="card"><div class="chead" style="margin:0"><div class="filters"><select id="rm">'+months.map(x=>'<option value="'+x+'"'+(x===m?' selected':'')+'>'+blnLabel(x)+'</option>').join('')+'</select>'+
-    '<select id="rk"><option value="">Semua klien</option>'+clients.map(c=>'<option value="'+esc(c.key)+'"'+(c.key===ck?' selected':'')+'>'+esc(c.name)+'</option>').join('')+'</select></div><button class="btn" data-act="csv">'+IC.dl+'Unduh rekap (Excel)</button></div>'+
-    '<div style="font-size:12px;color:var(--ink2);margin-top:10px">Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO, dikelompokkan per klien (kolom Project). Nilai jumlah sudah dipotong diskon. Rincian harga satuan ada di unduhan Excel.</div></div>'+
-    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px">'+tile('t1',IC.box,'Material',tot('Material'))+tile('t3',IC.rekap,'Inventaris',tot('Inventaris'))+tile('t4',IC.coin,ck?'Total '+esc(cname):'Total bulan ini',tot('Material')+tot('Inventaris'))+'</div>'+
-    per+sec('Material')+sec('Inventaris')+'</div>';
+    '<select id="rk"><option value="">Semua klien</option>'+clients.map(c=>'<option value="'+esc(c.key)+'"'+(c.key===ck?' selected':'')+'>'+esc(c.name)+'</option>').join('')+'</select>'+
+    (ck?'<button class="btn" data-act="rkall">Semua klien</button>':'')+'</div><button class="btn" data-act="csv">'+IC.dl+'Unduh rekap (Excel)</button></div>'+
+    '<div style="font-size:12px;color:var(--ink2);margin-top:10px">Berisi PO yang sudah disetujui penuh pada bulan yang dipilih, dirinci per klien (kolom Project). Jumlah sudah dipotong diskon; total klien sudah termasuk PPN dan ongkos kirim.</div></div>'+
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px">'+tile('t1',IC.box,'Material',T.mat)+tile('t3',IC.rekap,'Inventaris',T.inv)+tile('t4',IC.coin,ck?'Total '+esc(cname):'Total bulan ini',T.mat+T.inv)+'</div>'+
+    per+(shown.length?shown.map(card).join(''):'<div class="card empty">Belum ada pembelian yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>';
 }
 function loadExcel(){return window.ExcelJS?Promise.resolve():new Promise((ok,no)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';s.onload=()=>ok();s.onerror=()=>no(new Error('exceljs'));document.head.appendChild(s)})}
 async function rekapXLSX(){
   await loadExcel();
-  const {m,g,clients,ck,cname}=rekap(),bl=blnLabel(m),wb=new ExcelJS.Workbook();wb.creator='Dashboard PO Sembilan Puluh Interior';
+  const {m,clients,shown,ck,cname,T}=rekap(),bl=blnLabel(m),wb=new ExcelJS.Workbook();wb.creator='Dashboard PO Sembilan Puluh Interior';
   const ws=wb.addWorksheet('Rekap '+bl,{views:[{showGridLines:false}],pageSetup:{orientation:'landscape',paperSize:9,fitToPage:true,fitToWidth:1,fitToHeight:0,margins:{left:.4,right:.4,top:.5,bottom:.5,header:.2,footer:.2}}});
-  ws.columns=[5,12,17,22,22,34,8,9,16,14,18].map(w=>({width:w}));
-  const thin={style:'thin',color:{argb:'FFBFBFBF'}},box={top:thin,left:thin,bottom:thin,right:thin},fill=c=>({type:'pattern',pattern:'solid',fgColor:{argb:c}}),NF='#,##0;-#,##0;"-"',H=['No','Tanggal','No. PO','Project','Supplier','Nama Barang','Qty','Satuan','Harga Satuan (Rp)','Diskon (Rp)','Jumlah (Rp)'],AL=['center','center','left','left','left','left','center','center','right','right','right'];
+  ws.columns=[5,12,17,22,34,12,8,9,16,14,18].map(w=>({width:w}));
+  const thin={style:'thin',color:{argb:'FFBFBFBF'}},box={top:thin,left:thin,bottom:thin,right:thin},fill=c=>({type:'pattern',pattern:'solid',fgColor:{argb:c}}),NF='#,##0;-#,##0;"-"',
+    H=['No','Tanggal','No. PO','Supplier','Nama Barang','Jenis','Qty','Satuan','Harga Satuan (Rp)','Diskon (Rp)','Jumlah (Rp)'],AL=['center','center','left','left','left','center','center','center','right','right','right'];
   const band=(r,text,st)=>{ws.mergeCells(r,1,r,10);const c=ws.getCell(r,1);c.value=text;Object.assign(c,st);return c};
   let r=1;
   band(r,'SEMBILAN PULUH INTERIOR',{font:{bold:true,size:14,color:{argb:'FF1F3864'}}});ws.getRow(r).height=22;r++;
-  band(r,'REKAP PEMBELIAN — '+bl.toUpperCase()+(ck?'  ·  KLIEN: '+cname.toUpperCase():''),{font:{bold:true,size:12}});r++;
-  band(r,'Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Jumlah sudah dipotong diskon; ongkos kirim dicatat terpisah.',{font:{italic:true,size:9,color:{argb:'FF7F7F7F'}}});r+=2;
+  band(r,'REKAP PEMBELIAN PER KLIEN — '+bl.toUpperCase()+(ck?'  ·  '+cname.toUpperCase():''),{font:{bold:true,size:12}});r++;
+  band(r,'Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Jumlah sudah dipotong diskon; total klien termasuk PPN dan ongkos kirim.',{font:{italic:true,size:9,color:{argb:'FF7F7F7F'}}});r+=2;
   const totals=[];
-  ['Material','Inventaris'].forEach(k=>{
-    band(r,k.toUpperCase()+'  ·  '+g[k].rows.length+' item',{font:{bold:true,size:11}});r++;
+  if(!shown.length){band(r,'Belum ada pembelian yang disetujui pada '+bl+'.',{font:{italic:true,size:10,color:{argb:'FF7F7F7F'}}});r+=2}
+  shown.forEach(k=>{
+    band(r,'KLIEN: '+k.name.toUpperCase()+'  ·  '+k.po+' PO  ·  '+k.item+' barang',{font:{bold:true,size:11,color:{argb:'FF0A6C72'}}});ws.getRow(r).height=20;r++;
     H.forEach((h,i)=>{const c=ws.getCell(r,i+1);c.value=h;c.font={bold:true,color:{argb:'FFFFFFFF'},size:10};c.fill=fill('FF4A442A');c.alignment={horizontal:'center',vertical:'middle',wrapText:true};c.border=box});ws.getRow(r).height=22;r++;
     const first=r;
-    g[k].rows.forEach((x,n)=>{const d=String(x.p.tanggal||'').split('-'),dt=d.length===3?new Date(Date.UTC(+d[0],+d[1]-1,+d[2])):null;
-      [n+1,dt,x.p.no,x.p.project,x.p.supplier,x.i.nama,num(x.i.qty),x.i.satuan||'',num(x.i.harga),num(x.i.diskon),x.i.jumlah].forEach((v,i)=>{const c=ws.getCell(r,i+1);c.value=v;c.border=box;c.font={size:10};c.alignment={horizontal:AL[i],vertical:'middle',wrapText:i>=3&&i<=5};if(i===1)c.numFmt='dd/mm/yyyy';if(i>=8)c.numFmt=NF;if(i===6)c.numFmt='#,##0.###'});r++});
-    [['PPN',g[k].ppn],['Ongkos kirim',g[k].ong]].forEach(x=>{if(!x[1])return;for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;const c=ws.getCell(r,6);c.value=x[0];c.font={size:10,italic:true};const v=ws.getCell(r,11);v.value=x[1];v.numFmt=NF;v.font={size:10};v.alignment={horizontal:'right'};r++});
-    if(!g[k].rows.length){band(r,'Belum ada pembelian '+k.toLowerCase()+' yang disetujui pada '+bl+'.',{font:{italic:true,size:10,color:{argb:'FF7F7F7F'}},alignment:{horizontal:'center'}});for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;r++}
-    const tot=g[k].sub+g[k].ppn+g[k].ong;
-    band(r,'TOTAL '+k.toUpperCase(),{font:{bold:true,size:10},alignment:{horizontal:'right',vertical:'middle'},fill:fill('FFC4BD97')});
+    k.rows.forEach((x,n)=>{const d=String(x.p.tanggal||'').split('-'),dt=d.length===3?new Date(Date.UTC(+d[0],+d[1]-1,+d[2])):null;
+      [n+1,dt,x.p.no,x.p.supplier,x.i.nama,x.jenis,num(x.i.qty),x.i.satuan||'',num(x.i.harga),num(x.i.diskon),x.i.jumlah].forEach((v,i)=>{const c=ws.getCell(r,i+1);c.value=v;c.border=box;c.font={size:10};c.alignment={horizontal:AL[i],vertical:'middle',wrapText:i===3||i===4};if(i===1)c.numFmt='dd/mm/yyyy';if(i>=8)c.numFmt=NF;if(i===6)c.numFmt='#,##0.###'});r++});
+    [['PPN',k.ppn],['Ongkos kirim',k.ong]].forEach(x=>{if(!x[1])return;for(let i=1;i<=11;i++)ws.getCell(r,i).border=box;const c=ws.getCell(r,5);c.value=x[0];c.font={size:10,italic:true};const v=ws.getCell(r,11);v.value=x[1];v.numFmt=NF;v.font={size:10};v.alignment={horizontal:'right'};r++});
+    band(r,'TOTAL '+k.name.toUpperCase(),{font:{bold:true,size:10},alignment:{horizontal:'right',vertical:'middle'},fill:fill('FFC4BD97')});
     for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.border=box;c.fill=fill('FFC4BD97')}
-    const t=ws.getCell(r,11);t.value=g[k].rows.length?{formula:'SUM(K'+first+':K'+(r-1)+')',result:tot}:0;t.numFmt=NF;t.font={bold:true,size:10};t.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=20;totals.push('K'+r);r+=2});
+    const t=ws.getCell(r,11);t.value={formula:'SUM(K'+first+':K'+(r-1)+')',result:k.total};t.numFmt=NF;t.font={bold:true,size:10};t.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=20;totals.push('K'+r);r+=2});
   band(r,'TOTAL PEMBELIAN '+bl.toUpperCase()+(ck?' · '+cname.toUpperCase():''),{font:{bold:true,size:11,color:{argb:'FFFFFFFF'}},alignment:{horizontal:'right',vertical:'middle'}});
   for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.fill=fill('FF4A442A');c.border=box}
-  const gt=ws.getCell(r,11);gt.value={formula:totals.join('+'),result:g.Material.sub+g.Material.ppn+g.Material.ong+g.Inventaris.sub+g.Inventaris.ppn+g.Inventaris.ong};gt.numFmt=NF;gt.font={bold:true,size:11,color:{argb:'FFFFFFFF'}};gt.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=22;r+=2;
+  const gt=ws.getCell(r,11);gt.value=totals.length?{formula:totals.join('+'),result:T.mat+T.inv}:0;gt.numFmt=NF;gt.font={bold:true,size:11,color:{argb:'FFFFFFFF'}};gt.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=22;r+=2;
   band(r,'Dibuat '+tglShort(Date.now())+' dari Dashboard Pengajuan PO.',{font:{italic:true,size:8,color:{argb:'FF7F7F7F'}}});
   // Lembar kedua: ringkasan semua klien di bulan ini.
   const w2=wb.addWorksheet('Per Klien',{views:[{showGridLines:false}],pageSetup:{orientation:'portrait',paperSize:9,fitToPage:true,fitToWidth:1,fitToHeight:0}});
