@@ -123,7 +123,7 @@ const updUser = (uid,patch) => write(() => fs.collection('users').doc(uid).updat
 const updCfg = patch => write(() => fs.collection('config').doc('app').update(patch), () => Object.assign(S.cfg, patch));
 
 /* ---------- mulai ---------- */
-const VERSION = '17.11-f';
+const VERSION = '18.11-a';
 function init(){
   const bs = document.querySelector('.brand small'); if(bs) bs.textContent = 'Purchase Order · v' + VERSION;
   route();
@@ -279,41 +279,60 @@ function vAppr(){
     '<div class="card"><div class="chead"><h2>Riwayat keputusan Anda</h2></div>'+poTable(sorted().filter(mine), true, 'Belum ada riwayat.')+'</div></div>';
 }
 /* ----- rekap pembelian bulanan ----- */
+// Nama klien = kolom Project. Dikelompokkan tanpa membedakan huruf besar-kecil dan spasi berlebih.
+const clientKey=p=>String(p.project||'').trim().replace(/\s+/g,' ').toLowerCase()||'(tanpa nama)';
 function rekap(){
-  const m=S.rm||today().slice(0,7),g={Material:{rows:[],sub:0,ppn:0,ong:0},Inventaris:{rows:[],sub:0,ppn:0,ong:0}};
-  S.pos.filter(p=>done(p)&&String(p.tanggal||'').slice(0,7)===m)
-    .sort((a,b)=>String(a.tanggal).localeCompare(String(b.tanggal))||String(a.no).localeCompare(String(b.no)))
+  const m=S.rm||today().slice(0,7),month=S.pos.filter(p=>done(p)&&String(p.tanggal||'').slice(0,7)===m);
+  // Ringkasan semua klien di bulan ini (selalu lengkap, tidak ikut filter).
+  const cmap={};
+  month.forEach(p=>{const k=clientKey(p),c=calc(p),j=p.jenis==='Inventaris'?'inv':'mat';
+    const x=cmap[k]||(cmap[k]={key:k,name:String(p.project||'').trim()||'(tanpa nama)',po:0,item:0,mat:0,inv:0});
+    x.po++;x.item+=c.items.length;x[j]+=c.total});
+  const clients=Object.values(cmap).sort((a,b)=>(b.mat+b.inv)-(a.mat+a.inv)||a.name.localeCompare(b.name));
+  const ck=clients.some(c=>c.key===S.rk)?S.rk:'',cname=ck?cmap[ck].name:'';
+  const g={Material:{rows:[],sub:0,ppn:0,ong:0},Inventaris:{rows:[],sub:0,ppn:0,ong:0}};
+  month.filter(p=>!ck||clientKey(p)===ck)
+    .sort((a,b)=>clientKey(a).localeCompare(clientKey(b))||String(a.tanggal).localeCompare(String(b.tanggal))||String(a.no).localeCompare(String(b.no)))
     .forEach(p=>{const c=calc(p),k=g[p.jenis==='Inventaris'?'Inventaris':'Material'];c.items.forEach(i=>k.rows.push({p,i}));k.sub+=c.subtotal;k.ppn+=c.ppn;k.ong+=c.ongkir});
-  return {m,g};
+  return {m,g,clients,ck,cname,cmap};
 }
 const blnLabel=m=>BULAN[+m.slice(5,7)-1]+' '+m.slice(0,4);
 function vRekap(){
-  const {m,g}=rekap(),tot=k=>g[k].sub+g[k].ppn+g[k].ong;
+  const {m,g,clients,ck,cname,cmap}=rekap(),tot=k=>g[k].sub+g[k].ppn+g[k].ong;
   const months=[...new Set(S.pos.map(p=>String(p.tanggal||'').slice(0,7)).filter(x=>/^\d{4}-\d{2}$/.test(x)).concat(today().slice(0,7),m))].sort().reverse();
   const tile=(c,ic,l,v)=>'<div class="card tile"><div class="ticon '+c+'">'+ic+'</div><div><small>'+l+'</small><strong style="font-size:20px">'+rp(v)+'</strong></div></div>';
-  const sec=k=>'<div class="card"><div class="chead"><h2>'+k+' · '+g[k].rows.length+' item</h2><b style="font-weight:600">'+rp(tot(k))+'</b></div>'+(g[k].rows.length?
+  const sub=t=>'<br><span style="font-size:11.5px;color:var(--ink2)">'+t+'</span>';
+  const sec=k=>{let last=null;
+    return '<div class="card"><div class="chead"><h2>'+k+' · '+g[k].rows.length+' item</h2><b style="font-weight:600">'+rp(tot(k))+'</b></div>'+(g[k].rows.length?
     '<div class="tw"><table><thead><tr><th>Tgl</th><th>No. PO</th><th>Barang</th><th class="num">Qty</th><th class="num">Jumlah</th></tr></thead><tbody>'+
-    g[k].rows.map(r=>'<tr><td style="white-space:nowrap">'+esc(String(r.p.tanggal||'').slice(8,10)+'/'+String(r.p.tanggal||'').slice(5,7))+'</td><td><button class="pono" data-act="view" data-id="'+esc(r.p.id)+'">'+esc(r.p.no)+'</button></td><td>'+esc(r.i.nama)+'<br><span style="font-size:11.5px;color:var(--ink2)">'+esc(r.p.supplier)+' · '+esc(r.p.project)+'</span></td><td class="num">'+qtyf(r.i.qty)+' '+esc(r.i.satuan)+'</td><td class="num">'+rp(r.i.jumlah)+'</td></tr>').join('')+
+    g[k].rows.map(r=>{const key=clientKey(r.p),head=!ck&&key!==last?'<tr><td colspan="5" style="background:rgba(15,138,140,.08);font-weight:600;color:var(--teal-d);padding:9px 10px">'+esc(cmap[key].name)+'</td></tr>':'';last=key;
+      return head+'<tr><td style="white-space:nowrap">'+esc(String(r.p.tanggal||'').slice(8,10)+'/'+String(r.p.tanggal||'').slice(5,7))+'</td><td><button class="pono" data-act="view" data-id="'+esc(r.p.id)+'">'+esc(r.p.no)+'</button></td><td>'+esc(r.i.nama)+sub(esc(r.p.supplier))+'</td><td class="num">'+qtyf(r.i.qty)+' '+esc(r.i.satuan)+'</td><td class="num">'+rp(r.i.jumlah)+'</td></tr>'}).join('')+
     (g[k].ppn?'<tr><td colspan="4" class="num">PPN</td><td class="num">'+rp(g[k].ppn)+'</td></tr>':'')+
     (g[k].ong?'<tr><td colspan="4" class="num">Ongkos kirim</td><td class="num">'+rp(g[k].ong)+'</td></tr>':'')+
     '<tr><td colspan="4" class="num"><b>Total '+k+'</b></td><td class="num"><b>'+rp(tot(k))+'</b></td></tr></tbody></table></div>'
-    :'<div class="empty">Belum ada pembelian '+k.toLowerCase()+' yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>';
-  return '<div class="col"><div class="card"><div class="chead" style="margin:0"><div class="filters"><select id="rm">'+months.map(x=>'<option value="'+x+'"'+(x===m?' selected':'')+'>'+blnLabel(x)+'</option>').join('')+'</select></div><button class="btn" data-act="csv">'+IC.dl+'Unduh rekap (Excel)</button></div>'+
-    '<div style="font-size:12px;color:var(--ink2);margin-top:10px">Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Nilai jumlah sudah dipotong diskon. Rincian harga satuan ada di unduhan Excel.</div></div>'+
-    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px">'+tile('t1',IC.box,'Material',tot('Material'))+tile('t3',IC.rekap,'Inventaris',tot('Inventaris'))+tile('t4',IC.coin,'Total bulan ini',tot('Material')+tot('Inventaris'))+'</div>'+
-    sec('Material')+sec('Inventaris')+'</div>';
+    :'<div class="empty">Belum ada pembelian '+k.toLowerCase()+(ck?' untuk klien '+esc(cname):'')+' yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>'};
+  const per='<div class="card"><div class="chead"><h2>Ringkasan per klien · '+esc(blnLabel(m))+'</h2>'+(ck?'<button class="link" data-act="rkall">Tampilkan semua klien</button>':'')+'</div>'+(clients.length?
+    '<div class="tw"><table><thead><tr><th>Klien / project</th><th class="num">PO</th><th class="num">Material</th><th class="num">Inventaris</th><th class="num">Total</th></tr></thead><tbody>'+
+    clients.map(c=>'<tr'+(c.key===ck?' style="background:rgba(15,138,140,.1)"':'')+'><td><button class="pono" data-act="rkc" data-k="'+esc(c.key)+'">'+esc(c.name)+'</button>'+sub(c.item+' item')+'</td><td class="num">'+c.po+'</td><td class="num">'+(c.mat?rp(c.mat):'-')+'</td><td class="num">'+(c.inv?rp(c.inv):'-')+'</td><td class="num"><b>'+rp(c.mat+c.inv)+'</b></td></tr>').join('')+
+    '</tbody></table></div><div style="font-size:12px;color:var(--ink2);margin-top:10px">Klik nama klien untuk melihat rinciannya saja. Total per klien sudah termasuk PPN dan ongkos kirim.</div>'
+    :'<div class="empty">Belum ada pembelian yang disetujui pada '+esc(blnLabel(m))+'.</div>')+'</div>';
+  return '<div class="col"><div class="card"><div class="chead" style="margin:0"><div class="filters"><select id="rm">'+months.map(x=>'<option value="'+x+'"'+(x===m?' selected':'')+'>'+blnLabel(x)+'</option>').join('')+'</select>'+
+    '<select id="rk"><option value="">Semua klien</option>'+clients.map(c=>'<option value="'+esc(c.key)+'"'+(c.key===ck?' selected':'')+'>'+esc(c.name)+'</option>').join('')+'</select></div><button class="btn" data-act="csv">'+IC.dl+'Unduh rekap (Excel)</button></div>'+
+    '<div style="font-size:12px;color:var(--ink2);margin-top:10px">Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO, dikelompokkan per klien (kolom Project). Nilai jumlah sudah dipotong diskon. Rincian harga satuan ada di unduhan Excel.</div></div>'+
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px">'+tile('t1',IC.box,'Material',tot('Material'))+tile('t3',IC.rekap,'Inventaris',tot('Inventaris'))+tile('t4',IC.coin,ck?'Total '+esc(cname):'Total bulan ini',tot('Material')+tot('Inventaris'))+'</div>'+
+    per+sec('Material')+sec('Inventaris')+'</div>';
 }
 function loadExcel(){return window.ExcelJS?Promise.resolve():new Promise((ok,no)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';s.onload=()=>ok();s.onerror=()=>no(new Error('exceljs'));document.head.appendChild(s)})}
 async function rekapXLSX(){
   await loadExcel();
-  const {m,g}=rekap(),bl=blnLabel(m),wb=new ExcelJS.Workbook();wb.creator='Dashboard PO Sembilan Puluh Interior';
+  const {m,g,clients,ck,cname}=rekap(),bl=blnLabel(m),wb=new ExcelJS.Workbook();wb.creator='Dashboard PO Sembilan Puluh Interior';
   const ws=wb.addWorksheet('Rekap '+bl,{views:[{showGridLines:false}],pageSetup:{orientation:'landscape',paperSize:9,fitToPage:true,fitToWidth:1,fitToHeight:0,margins:{left:.4,right:.4,top:.5,bottom:.5,header:.2,footer:.2}}});
   ws.columns=[5,12,17,22,22,34,8,9,16,14,18].map(w=>({width:w}));
   const thin={style:'thin',color:{argb:'FFBFBFBF'}},box={top:thin,left:thin,bottom:thin,right:thin},fill=c=>({type:'pattern',pattern:'solid',fgColor:{argb:c}}),NF='#,##0;-#,##0;"-"',H=['No','Tanggal','No. PO','Project','Supplier','Nama Barang','Qty','Satuan','Harga Satuan (Rp)','Diskon (Rp)','Jumlah (Rp)'],AL=['center','center','left','left','left','left','center','center','right','right','right'];
   const band=(r,text,st)=>{ws.mergeCells(r,1,r,10);const c=ws.getCell(r,1);c.value=text;Object.assign(c,st);return c};
   let r=1;
   band(r,'SEMBILAN PULUH INTERIOR',{font:{bold:true,size:14,color:{argb:'FF1F3864'}}});ws.getRow(r).height=22;r++;
-  band(r,'REKAP PEMBELIAN — '+bl.toUpperCase(),{font:{bold:true,size:12}});r++;
+  band(r,'REKAP PEMBELIAN — '+bl.toUpperCase()+(ck?'  ·  KLIEN: '+cname.toUpperCase():''),{font:{bold:true,size:12}});r++;
   band(r,'Berisi PO yang sudah disetujui penuh, berdasarkan tanggal PO. Jumlah sudah dipotong diskon; ongkos kirim dicatat terpisah.',{font:{italic:true,size:9,color:{argb:'FF7F7F7F'}}});r+=2;
   const totals=[];
   ['Material','Inventaris'].forEach(k=>{
@@ -328,12 +347,23 @@ async function rekapXLSX(){
     band(r,'TOTAL '+k.toUpperCase(),{font:{bold:true,size:10},alignment:{horizontal:'right',vertical:'middle'},fill:fill('FFC4BD97')});
     for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.border=box;c.fill=fill('FFC4BD97')}
     const t=ws.getCell(r,11);t.value=g[k].rows.length?{formula:'SUM(K'+first+':K'+(r-1)+')',result:tot}:0;t.numFmt=NF;t.font={bold:true,size:10};t.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=20;totals.push('K'+r);r+=2});
-  band(r,'TOTAL PEMBELIAN '+bl.toUpperCase(),{font:{bold:true,size:11,color:{argb:'FFFFFFFF'}},alignment:{horizontal:'right',vertical:'middle'}});
+  band(r,'TOTAL PEMBELIAN '+bl.toUpperCase()+(ck?' · '+cname.toUpperCase():''),{font:{bold:true,size:11,color:{argb:'FFFFFFFF'}},alignment:{horizontal:'right',vertical:'middle'}});
   for(let i=1;i<=11;i++){const c=ws.getCell(r,i);c.fill=fill('FF4A442A');c.border=box}
   const gt=ws.getCell(r,11);gt.value={formula:totals.join('+'),result:g.Material.sub+g.Material.ppn+g.Material.ong+g.Inventaris.sub+g.Inventaris.ppn+g.Inventaris.ong};gt.numFmt=NF;gt.font={bold:true,size:11,color:{argb:'FFFFFFFF'}};gt.alignment={horizontal:'right',vertical:'middle'};ws.getRow(r).height=22;r+=2;
   band(r,'Dibuat '+tglShort(Date.now())+' dari Dashboard Pengajuan PO.',{font:{italic:true,size:8,color:{argb:'FF7F7F7F'}}});
+  // Lembar kedua: ringkasan semua klien di bulan ini.
+  const w2=wb.addWorksheet('Per Klien',{views:[{showGridLines:false}],pageSetup:{orientation:'portrait',paperSize:9,fitToPage:true,fitToWidth:1,fitToHeight:0}});
+  w2.columns=[5,36,8,8,18,18,20].map(w=>({width:w}));
+  const H2=['No','Klien / Project','PO','Item','Material (Rp)','Inventaris (Rp)','Total (Rp)'];
+  w2.mergeCells(1,1,1,7);Object.assign(w2.getCell(1,1),{value:'REKAP PEMBELIAN PER KLIEN — '+bl.toUpperCase(),font:{bold:true,size:12}});
+  w2.mergeCells(2,1,2,7);Object.assign(w2.getCell(2,1),{value:'Total per klien sudah termasuk PPN dan ongkos kirim.',font:{italic:true,size:9,color:{argb:'FF7F7F7F'}}});
+  H2.forEach((h,i)=>{const c=w2.getCell(4,i+1);c.value=h;c.font={bold:true,color:{argb:'FFFFFFFF'},size:10};c.fill=fill('FF4A442A');c.alignment={horizontal:'center',vertical:'middle'};c.border=box});w2.getRow(4).height=22;
+  let q=5;clients.forEach((c,n)=>{[n+1,c.name,c.po,c.item,c.mat,c.inv,{formula:'E'+q+'+F'+q,result:c.mat+c.inv}].forEach((v,i)=>{const x=w2.getCell(q,i+1);x.value=v;x.border=box;x.font={size:10,bold:i===6};x.alignment={horizontal:i===1?'left':i<4?'center':'right',vertical:'middle'};if(i>=4)x.numFmt=NF});q++});
+  w2.mergeCells(q,1,q,4);Object.assign(w2.getCell(q,1),{value:'TOTAL',font:{bold:true,size:10},alignment:{horizontal:'right'}});
+  for(let i=1;i<=7;i++){const x=w2.getCell(q,i);x.border=box;x.fill=fill('FFC4BD97')}
+  ['E','F','G'].forEach((col,j)=>{const x=w2.getCell(q,5+j);x.value=clients.length?{formula:'SUM('+col+'5:'+col+(q-1)+')',result:clients.reduce((a,c)=>a+(j===0?c.mat:j===1?c.inv:c.mat+c.inv),0)}:0;x.numFmt=NF;x.font={bold:true,size:10};x.alignment={horizontal:'right'}});
   const buf=await wb.xlsx.writeBuffer();
-  return {name:'Rekap-Pembelian-'+m+'.xlsx',blob:new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})};
+  return {name:'Rekap-Pembelian-'+m+(ck?'-'+cname.replace(/[^\w-]+/g,'_').slice(0,40):'')+'.xlsx',blob:new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})};
 }
 async function doCSV(btn){ btn.disabled = true; try { const r = await rekapXLSX(); await saveFile(r.name, r.blob); } catch(e){ console.error(e); toast(e && e.code === 'declined' ? 'Unduhan dibatalkan.' : e && e.code ? 'Unduhan tidak tersedia di tampilan ini.' : 'Gagal membuat file Excel. Periksa koneksi internet lalu coba lagi.'); } btn.disabled = false; }
 /* ----- pengaturan (admin) ----- */
@@ -626,6 +656,8 @@ document.addEventListener('click', e => {
   else if(a === 'gswitch'){ S.gate = S.gate === 'login' ? 'daftar' : 'login'; render(); }
   else if(a === 'greset'){ const em = $('#gEmail').value.trim(); if(!em) return toast('Isi email Anda dulu.'); auth.sendPasswordResetEmail(em).then(() => toast('Tautan atur ulang kata sandi dikirim ke '+em+'.')).catch(er => toast(AUTH_MSG[er.code] || 'Gagal mengirim tautan.')); }
   else if(a === 'logout'){ if(auth) auth.signOut(); else toast('Mode demo tidak memakai login.'); }
+  else if(a === 'rkc'){ S.rk = b.dataset.k; render(); window.scrollTo(0,0); }
+  else if(a === 'rkall'){ S.rk = ''; render(); }
   else if(a === 'golist') location.hash = 'pengajuan';
   else if(a === 'goappr') location.hash = 'persetujuan';
   else if(a === 'new') openForm(null);
@@ -665,6 +697,7 @@ document.addEventListener('change', e => {
   if(t.id === 'pFile'){ const f = t.files[0]; if(!f || !pad) return; const im = new Image(); im.onload = () => { pad.load(im); URL.revokeObjectURL(im.src); }; im.onerror = () => toast('Gambar tidak bisa dibaca. Pakai PNG atau JPG.'); im.src = URL.createObjectURL(f); t.value = ''; }
   else if(t.id === 'fs'){ S.fs = t.value; render(); }
   else if(t.id === 'rm'){ S.rm = t.value; render(); }
+  else if(t.id === 'rk'){ S.rk = t.value; render(); }
   else if(t.id === 'fSup') fillRek();
   else if(t.id === 'fTgl' && F && !F.id && !F.noEdited){ $('#fNo').value = F.no = nextNo(t.value || today()); }
   else if(t.dataset.rm != null) W.rules[+t.dataset.rm].modes[t.dataset.j] = t.value;
